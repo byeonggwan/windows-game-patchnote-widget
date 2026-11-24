@@ -80,16 +80,22 @@ namespace PatchNoteMailbox.Models
         public List<string> ReadIds { get; set; }
         public string LastFetchedAt { get; set; }
 
+        /// <summary>UTC time of the last successful fetch, round-trip format ("o"). Drives the stale caption.</summary>
+        public string FetchedAtUtc { get; set; }
+
         public GameCacheEntry()
         {
             Notes = new List<PatchNoteItem>();
             ReadIds = new List<string>();
             LastFetchedAt = "";
+            FetchedAtUtc = "";
         }
     }
 
     public class AppState
     {
+        // Window position before the move to BWUI. BWUI keeps the position in settings.txt now;
+        // these are only read once, to migrate it (see DockWindow.MigratePosition).
         public double DockLeft { get; set; }
         public double DockTop { get; set; }
         public string ExpandDirection { get; set; }

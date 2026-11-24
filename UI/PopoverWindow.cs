@@ -1,90 +1,86 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
-using System.Windows.Media.Effects;
-using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
+using Bwui;
 using PatchNoteMailbox.Models;
 
 namespace PatchNoteMailbox.UI
 {
+    /// <summary>What the dock knows about one game's data source (DESIGN.md §5).</summary>
+    public class GameStatus
+    {
+        public bool Loading;      // a fetch is running
+        public string Error;      // reason the last fetch failed, or null
+        public Freshness Fresh;   // age of the last good fetch
+    }
+
+    /// <summary>
+    /// Transient patch note list for one game. Not a BwuiWindow (it isn't pinned to the desktop and has
+    /// no menu), but it has the same card: Theme colors, CardRadius, CardPadding, the card shadow, Ui text styles.
+    /// </summary>
     public class PopoverWindow : Window
     {
         private const int PageSize = 5;
-
-        private static Color C(string hex) { return (Color)ColorConverter.ConvertFromString(hex); }
-        private static Brush B(Color c) { var b = new SolidColorBrush(c); b.Freeze(); return b; }
-
-        private static readonly Color CText = C("#1F1E1C");
-        private static readonly Color CLabel = C("#6B6962");
-        private static readonly Color CMuted = C("#8A8780");
-        private static readonly Color CSep = C("#EFEDE7");
-        private static readonly Color CDanger = C("#E24B4A");
-        private static readonly Color CBtn = C("#F4F3EF");
-        private static readonly Color CBtnHover = C("#E9E7E0");
-        private static readonly Color CRowHover = C("#F8F7F4");
+        private const double RowHeight = 36;                       // 9 × 4px; also above the 28px click target (C9)
+        private const double ColDot = Tokens.Space3, ColIdx = 48, ColDate = 68;
 
         private readonly Action<string, string> _onMarkRead;
         private readonly Action<string> _onMarkAllRead;
         private readonly Action<string> _onRefreshGame;
-        private readonly Func<string, string> _getIconPath;
+        private readonly Func<string, ImageSource> _getIcon;
+        private readonly Border _card;
 
         private GameConfig _game;
         private GameCacheEntry _cache;
+        private GameStatus _status = new GameStatus();
         private int _page = 1;
 
-        private Border _card;
-        private StackPanel _contentStack;
-
         public string ActiveGameId { get { return _game != null ? _game.Id : null; } }
+
+        /// <summary>The popover uses BWUI's Wide content width (352).</summary>
+        public static double ContentWidth { get { return Tokens.ContentWidth(WidgetSize.Wide); } }
 
         public PopoverWindow(
             Action<string, string> onMarkRead,
             Action<string> onMarkAllRead,
             Action<string> onRefreshGame,
-            Func<string, string> getIconPath)
+            Func<string, ImageSource> getIcon)
         {
             _onMarkRead = onMarkRead;
             _onMarkAllRead = onMarkAllRead;
             _onRefreshGame = onRefreshGame;
-            _getIconPath = getIconPath;
+            _getIcon = getIcon;
 
+            Title = Text.T("패치노트", "Patch notes");
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
             Background = Brushes.Transparent;
             ShowInTaskbar = false;
             ResizeMode = ResizeMode.NoResize;
-            Width = 452;
-            SizeToContent = SizeToContent.Height;
-            FontFamily = new FontFamily("Segoe UI Variable Text, Segoe UI, Malgun Gothic");
+            SizeToContent = SizeToContent.WidthAndHeight;
+            WindowStartupLocation = WindowStartupLocation.Manual;
+            FontFamily = new FontFamily(Tokens.FontFamily);
             UseLayoutRounding = true;
 
-            _card = new Border
-            {
-                Background = Brushes.White,
-                CornerRadius = new CornerRadius(22),
-                Margin = new Thickness(16),
-                Padding = new Thickness(18, 15, 18, 13),
-                Effect = new DropShadowEffect
-                {
-                    BlurRadius = 24,
-                    ShadowDepth = 4,
-                    Direction = 270,
-                    Opacity = 0.16,
-                    Color = C("#1E283C")
-                }
-            };
-
-            _contentStack = new StackPanel();
-            _card.Child = _contentStack;
+            _card = new Border();
+            UiX.StyleCard(_card);
             Content = _card;
+
+            // Follow Light / Dark / High Contrast like the dock does.
+            EventHandler onTheme = delegate
+            {
+                UiX.StyleCard(_card);
+                if (IsVisible) Render();
+            };
+            Theme.Changed += onTheme;
+            Closed += delegate { Theme.Changed -= onTheme; };
 
             SourceInitialized += OnSourceInitialized;
             KeyDown += delegate(object s, KeyEventArgs e)
@@ -93,73 +89,67 @@ namespace PatchNoteMailbox.UI
             };
         }
 
-        public void ShowForGame(GameConfig game, GameCacheEntry cache, Window dockWindow, string expandDirection)
+        public void ShowForGame(GameConfig game, GameCacheEntry cache, GameStatus status, Window dock, string expandDirection)
         {
             bool changedGame = (_game == null || _game.Id != game.Id);
             _game = game;
             _cache = cache ?? new GameCacheEntry();
+            _status = status ?? new GameStatus();
             if (changedGame) _page = 1;
 
             Render();
             if (!IsVisible) Show();
             UpdateLayout();
-            PositionNearDock(dockWindow, expandDirection);
+            PositionNearDock(dock, expandDirection);
             Activate();
         }
 
-        public void RefreshView(GameCacheEntry cache)
+        public void RefreshView(GameCacheEntry cache, GameStatus status)
         {
             if (_game == null) return;
             _cache = cache ?? new GameCacheEntry();
+            _status = status ?? new GameStatus();
             if (IsVisible) Render();
         }
 
-        public FrameworkElement DetachCardForSnapshot(GameConfig game, GameCacheEntry cache)
+        /// <summary>The card content for a game, for the dock's --snapshot (the dock's card has the same look).</summary>
+        public FrameworkElement BuildContent(GameConfig game, GameCacheEntry cache, GameStatus status)
         {
             _game = game;
             _cache = cache ?? new GameCacheEntry();
+            _status = status ?? new GameStatus();
             _page = 1;
-            Render();
-            Content = null;
-            _card.Width = 420;
-            return _card;
+            return Build();
         }
 
         private void PositionNearDock(Window dock, string expandDirection)
         {
+            // The two cards sit Space3 apart: overlap the transparent shadow margins of both windows.
+            double overlap = 2 * Tokens.ShadowRoom - Tokens.Space3;
             Rect work = SystemParameters.WorkArea;
             string dir = (expandDirection ?? "up").ToLowerInvariant();
+            double w = ActualWidth, h = ActualHeight;
             double x, y;
 
             if (dir == "left" || dir == "right")
             {
-                // Horizontal dock: open above if room, otherwise below
-                x = (dir == "left")
-                    ? dock.Left + dock.ActualWidth - Width
-                    : dock.Left;
-                y = dock.Top - ActualHeight + 22;
-                if (y < work.Top)
-                {
-                    y = dock.Top + dock.ActualHeight - 22;
-                }
+                // Horizontal dock: open above if there is room, otherwise below.
+                x = (dir == "left") ? dock.Left + dock.ActualWidth - w : dock.Left;
+                y = dock.Top - h + overlap;
+                if (y < work.Top) y = dock.Top + dock.ActualHeight - overlap;
             }
             else
             {
-                // Vertical dock: open to the left if room, otherwise right
-                x = dock.Left - Width + 22;
-                if (x < work.Left)
-                {
-                    x = dock.Left + dock.ActualWidth - 22;
-                }
-                y = (dir == "down")
-                    ? dock.Top
-                    : dock.Top + dock.ActualHeight - ActualHeight;
+                // Vertical dock: open to the left if there is room, otherwise to the right.
+                x = dock.Left - w + overlap;
+                if (x < work.Left) x = dock.Left + dock.ActualWidth - overlap;
+                y = (dir == "down") ? dock.Top : dock.Top + dock.ActualHeight - h;
             }
 
             if (x < work.Left) x = work.Left;
-            if (x + Width > work.Right) x = work.Right - Width;
+            if (x + w > work.Right) x = work.Right - w;
             if (y < work.Top) y = work.Top;
-            if (y + ActualHeight > work.Bottom) y = work.Bottom - ActualHeight;
+            if (y + h > work.Bottom) y = work.Bottom - h;
 
             Left = x;
             Top = y;
@@ -167,9 +157,15 @@ namespace PatchNoteMailbox.UI
 
         private void Render()
         {
-            _contentStack.Children.Clear();
             if (_game == null) return;
+            _card.Child = Build();
+        }
 
+        private FrameworkElement Build()
+        {
+            var p = Theme.Current;
+            var accent = DockWindow.Accent;
+            double w = ContentWidth;
             var notes = _cache.Notes ?? new List<PatchNoteItem>();
             var readSet = new HashSet<string>(_cache.ReadIds ?? new List<string>());
             int unreadCount = 0;
@@ -178,306 +174,158 @@ namespace PatchNoteMailbox.UI
                 if (!readSet.Contains(notes[i].Idx)) unreadCount++;
             }
 
-            // 1. Clean Header (Icon + Game Name + Actions only)
-            var headerGrid = new Grid { Margin = new Thickness(0, 0, 0, 12) };
-            headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var root = new StackPanel { Width = w };
 
-            var leftPanel = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            string iconPath = _getIconPath(_game.Id);
-            if (!string.IsNullOrEmpty(iconPath) && File.Exists(iconPath))
+            // 1. Header: game logo + name; trailing: freshness caption and actions.
+            var trailing = new StackPanel { Orientation = Orientation.Horizontal };
+            string asOf = notes.Count > 0 ? _status.Fresh.Caption : null;
+            if (asOf != null)
             {
-                var iconBorder = new Border
-                {
-                    Width = 22,
-                    Height = 22,
-                    CornerRadius = new CornerRadius(6),
-                    Margin = new Thickness(0, 0, 8, 0),
-                    ClipToBounds = true
-                };
-                var img = new Image { Source = LoadBitmap(iconPath), Stretch = Stretch.UniformToFill };
-                RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
-                iconBorder.Child = img;
-                leftPanel.Children.Add(iconBorder);
+                var c = Ui.Text(asOf, TextStyle.Caption);
+                c.VerticalAlignment = VerticalAlignment.Center;
+                c.Margin = new Thickness(0, 0, Tokens.Space2, 0);
+                trailing.Children.Add(c);
             }
-
-            leftPanel.Children.Add(new TextBlock
-            {
-                Text = _game.Name,
-                FontSize = 14,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = B(CText),
-                VerticalAlignment = VerticalAlignment.Center
-            });
-            Grid.SetColumn(leftPanel, 0);
-            headerGrid.Children.Add(leftPanel);
-
-            var rightPanel = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             if (unreadCount > 0)
             {
-                var markAllBtn = CreatePillButton("모두 읽음", delegate { _onMarkAllRead(_game.Id); });
-                markAllBtn.Margin = new Thickness(0, 0, 6, 0);
-                rightPanel.Children.Add(markAllBtn);
+                var markAll = Ui.TextButton(Text.T("모두 읽음", "Mark all read"), delegate { _onMarkAllRead(_game.Id); });
+                markAll.Margin = new Thickness(0, 0, Tokens.Space2, 0);
+                trailing.Children.Add(markAll);
+            }
+            var refresh = Ui.IconButton(Glyphs.Refresh, Text.T("새로고침", "Refresh"), delegate { _onRefreshGame(_game.Id); });
+            refresh.Margin = new Thickness(0, 0, Tokens.Space2, 0);
+            trailing.Children.Add(refresh);
+            trailing.Children.Add(Ui.IconButton(UiX.Close, Text.T("닫기", "Close"), delegate { Hide(); }));
+
+            root.Children.Add(Ui.Header(GameIcon(accent), _game.Name, trailing));
+            root.Children.Add(Ui.Divider());
+
+            // 2. States without a list (DESIGN.md §5). Data, once there is any, is always shown.
+            if (notes.Count == 0)
+            {
+                FrameworkElement body;
+                if (_status.Loading || (_status.Error == null && !_status.Fresh.HasData))
+                    body = Ui.Skeleton(w, 3);                                                   // Loading
+                else if (_status.Error != null)
+                    body = Ui.Message(_status.Error, Text.Retry, delegate { _onRefreshGame(_game.Id); });   // Error
+                else
+                    body = Ui.Message(Text.T("아직 올라온 패치노트가 없어요", "No patch notes yet"));          // Empty
+                body.Margin = new Thickness(0);
+                root.Children.Add(body);
+                return root;
             }
 
-            var refreshBtn = CreateCircleButton("↻", "새로고침", delegate { _onRefreshGame(_game.Id); });
-            refreshBtn.Margin = new Thickness(0, 0, 6, 0);
-            rightPanel.Children.Add(refreshBtn);
+            // 3. Column labels and a 5-item page, latest first. Rows are spaced, not divided (§4 Divider).
+            var cols = RowGrid();
+            AddCell(cols, 1, Ui.Text("IDX", TextStyle.Caption), HorizontalAlignment.Left);
+            AddCell(cols, 2, Ui.Text(Text.T("제목", "Title"), TextStyle.Caption), HorizontalAlignment.Left);
+            AddCell(cols, 3, Ui.Text(Text.T("등록일", "Date"), TextStyle.Caption), HorizontalAlignment.Right);
+            cols.Margin = new Thickness(Tokens.Space2, 0, Tokens.Space2, Tokens.Space1);
+            root.Children.Add(cols);
 
-            var closeBtn = CreateCircleButton("✕", "닫기", delegate { Hide(); });
-            rightPanel.Children.Add(closeBtn);
-
-            Grid.SetColumn(rightPanel, 1);
-            headerGrid.Children.Add(rightPanel);
-            _contentStack.Children.Add(headerGrid);
-
-            _contentStack.Children.Add(new Border { Height = 1, Background = B(CSep) });
-
-            // 2. Column Header
-            var colGrid = new Grid { Margin = new Thickness(4, 8, 4, 6) };
-            colGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(14) });
-            colGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(58) });
-            colGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            colGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(74) });
-
-            AddColLabel(colGrid, 1, "IDX", HorizontalAlignment.Left);
-            AddColLabel(colGrid, 2, "제목", HorizontalAlignment.Left);
-            AddColLabel(colGrid, 3, "등록일", HorizontalAlignment.Right);
-            _contentStack.Children.Add(colGrid);
-
-            // 3. 5-Item Paginated List
             int totalPages = Math.Max(1, (int)Math.Ceiling(notes.Count / (double)PageSize));
             if (_page > totalPages) _page = totalPages;
             if (_page < 1) _page = 1;
-
             int start = (_page - 1) * PageSize;
             int count = Math.Min(PageSize, Math.Max(0, notes.Count - start));
 
-            var listStack = new StackPanel { MinHeight = 186 };
-            if (count == 0)
+            var list = new StackPanel { MinHeight = PageSize * RowHeight, Opacity = _status.Fresh.BodyOpacity };
+            for (int i = 0; i < count; i++)
             {
-                listStack.Children.Add(new TextBlock
-                {
-                    Text = "표시할 패치노트가 없습니다.",
-                    Foreground = B(CMuted),
-                    FontSize = 12,
-                    TextAlignment = TextAlignment.Center,
-                    Margin = new Thickness(0, 72, 0, 0)
-                });
+                var item = notes[start + i];
+                list.Children.Add(BuildRow(item, readSet.Contains(item.Idx), accent));
             }
-            else
-            {
-                for (int i = 0; i < count; i++)
-                {
-                    var item = notes[start + i];
-                    bool isRead = readSet.Contains(item.Idx);
+            root.Children.Add(list);
+            root.Children.Add(Ui.Divider());
 
-                    var rowBorder = new Border
-                    {
-                        Padding = new Thickness(4, 9, 4, 9),
-                        CornerRadius = new CornerRadius(8),
-                        Background = Brushes.Transparent,
-                        Cursor = Cursors.Hand,
-                        ToolTip = item.Title
-                    };
-
-                    var rowGrid = new Grid();
-                    rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(14) });
-                    rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(58) });
-                    rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-                    rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(74) });
-
-                    var dot = new Ellipse
-                    {
-                        Width = 6,
-                        Height = 6,
-                        Fill = isRead ? Brushes.Transparent : B(CDanger),
-                        VerticalAlignment = VerticalAlignment.Center,
-                        HorizontalAlignment = HorizontalAlignment.Left
-                    };
-                    Grid.SetColumn(dot, 0);
-                    rowGrid.Children.Add(dot);
-
-                    var idxText = new TextBlock
-                    {
-                        Text = item.Idx,
-                        FontFamily = new FontFamily("Consolas"),
-                        FontSize = 11.5,
-                        Foreground = B(CMuted),
-                        VerticalAlignment = VerticalAlignment.Center,
-                        TextTrimming = TextTrimming.CharacterEllipsis
-                    };
-                    Grid.SetColumn(idxText, 1);
-                    rowGrid.Children.Add(idxText);
-
-                    var titleText = new TextBlock
-                    {
-                        Text = item.Title,
-                        FontSize = 12.5,
-                        FontWeight = isRead ? FontWeights.Normal : FontWeights.SemiBold,
-                        Foreground = isRead ? B(CMuted) : B(CText),
-                        VerticalAlignment = VerticalAlignment.Center,
-                        TextTrimming = TextTrimming.CharacterEllipsis,
-                        Margin = new Thickness(0, 0, 8, 0)
-                    };
-                    Grid.SetColumn(titleText, 2);
-                    rowGrid.Children.Add(titleText);
-
-                    var dateText = new TextBlock
-                    {
-                        Text = item.Date,
-                        FontSize = 11.5,
-                        Foreground = B(CMuted),
-                        VerticalAlignment = VerticalAlignment.Center,
-                        HorizontalAlignment = HorizontalAlignment.Right
-                    };
-                    Grid.SetColumn(dateText, 3);
-                    rowGrid.Children.Add(dateText);
-
-                    rowBorder.Child = rowGrid;
-
-                    rowBorder.MouseEnter += delegate { rowBorder.Background = B(CRowHover); };
-                    rowBorder.MouseLeave += delegate { rowBorder.Background = Brushes.Transparent; };
-
-                    var capturedItem = item;
-                    rowBorder.MouseLeftButtonUp += delegate
-                    {
-                        OpenInBrowser(capturedItem.Url);
-                        _onMarkRead(_game.Id, capturedItem.Idx);
-                    };
-
-                    listStack.Children.Add(rowBorder);
-                    if (i < count - 1)
-                    {
-                        listStack.Children.Add(new Border { Height = 1, Background = B(CSep), Margin = new Thickness(4, 0, 4, 0) });
-                    }
-                }
-            }
-
-            _contentStack.Children.Add(listStack);
-            _contentStack.Children.Add(new Border { Height = 1, Background = B(CSep), Margin = new Thickness(0, 6, 0, 10) });
-
-            // 4. Pagination Footer
-            var footerGrid = new Grid();
-            footerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            footerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-            footerGrid.Children.Add(new TextBlock
-            {
-                Text = string.Format("총 {0}건", notes.Count),
-                FontSize = 11.5,
-                Foreground = B(CMuted),
-                VerticalAlignment = VerticalAlignment.Center
-            });
-
-            var pager = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            pager.Children.Add(CreatePageButton("이전", _page > 1, delegate
+            // 4. Footer: total and pager.
+            var footer = new DockPanel { LastChildFill = true };
+            var pager = new StackPanel { Orientation = Orientation.Horizontal };
+            pager.Children.Add(UiX.TextButton(Text.T("이전", "Prev"), _page > 1, delegate
             {
                 if (_page > 1) { _page--; Render(); }
             }));
-            pager.Children.Add(new TextBlock
-            {
-                Text = string.Format("{0} / {1}", _page, totalPages),
-                FontSize = 11.5,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = B(CText),
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(10, 0, 10, 0)
-            });
-            pager.Children.Add(CreatePageButton("다음", _page < totalPages, delegate
+            var pageText = Ui.Text(string.Format("{0} / {1}", _page, totalPages), TextStyle.Label, p.TextPrimary);
+            pageText.VerticalAlignment = VerticalAlignment.Center;
+            pageText.Margin = new Thickness(Tokens.Space3, 0, Tokens.Space3, 0);
+            pager.Children.Add(pageText);
+            pager.Children.Add(UiX.TextButton(Text.T("다음", "Next"), _page < totalPages, delegate
             {
                 if (_page < totalPages) { _page++; Render(); }
             }));
-
-            Grid.SetColumn(pager, 1);
-            footerGrid.Children.Add(pager);
-            _contentStack.Children.Add(footerGrid);
+            DockPanel.SetDock(pager, Dock.Right);
+            footer.Children.Add(pager);
+            var total = Ui.Text(Text.T(string.Format("총 {0}건", notes.Count), string.Format("{0} notes", notes.Count)), TextStyle.Caption);
+            total.VerticalAlignment = VerticalAlignment.Center;
+            footer.Children.Add(total);
+            root.Children.Add(footer);
+            return root;
         }
 
-        private static void AddColLabel(Grid g, int col, string text, HorizontalAlignment align)
+        private FrameworkElement BuildRow(PatchNoteItem item, bool isRead, Color accent)
         {
-            var tb = new TextBlock
-            {
-                Text = text,
-                FontSize = 11,
-                Foreground = B(CMuted),
-                HorizontalAlignment = align
-            };
-            Grid.SetColumn(tb, col);
-            g.Children.Add(tb);
-        }
+            var p = Theme.Current;
+            var g = RowGrid();
 
-        private static Border CreateCircleButton(string glyph, string tooltip, Action onClick)
-        {
-            var b = new Border
+            // Unread: a dot AND a SemiBold title (and "Unread" in the accessible name), never color alone (C3).
+            if (!isRead)
             {
-                Width = 24,
-                Height = 24,
-                CornerRadius = new CornerRadius(12),
-                Background = B(CBtn),
-                Cursor = Cursors.Hand,
-                ToolTip = tooltip,
-                Child = new TextBlock
+                var dot = new Ellipse
                 {
-                    Text = glyph,
-                    FontSize = 11.5,
-                    Foreground = B(CLabel),
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    VerticalAlignment = VerticalAlignment.Center
-                }
-            };
-            b.MouseEnter += delegate { b.Background = B(CBtnHover); };
-            b.MouseLeave += delegate { b.Background = B(CBtn); };
-            b.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; onClick(); };
-            return b;
-        }
-
-        private static Border CreatePillButton(string text, Action onClick)
-        {
-            var b = new Border
-            {
-                Height = 24,
-                Padding = new Thickness(9, 0, 9, 0),
-                CornerRadius = new CornerRadius(12),
-                Background = B(CBtn),
-                Cursor = Cursors.Hand,
-                Child = new TextBlock
-                {
-                    Text = text,
-                    FontSize = 11,
-                    Foreground = B(CLabel),
-                    VerticalAlignment = VerticalAlignment.Center
-                }
-            };
-            b.MouseEnter += delegate { b.Background = B(CBtnHover); };
-            b.MouseLeave += delegate { b.Background = B(CBtn); };
-            b.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; onClick(); };
-            return b;
-        }
-
-        private static Border CreatePageButton(string text, bool enabled, Action onClick)
-        {
-            var b = new Border
-            {
-                Padding = new Thickness(9, 4, 9, 4),
-                CornerRadius = new CornerRadius(8),
-                Background = B(CBtn),
-                Opacity = enabled ? 1.0 : 0.4,
-                Cursor = enabled ? Cursors.Hand : Cursors.Arrow,
-                Child = new TextBlock
-                {
-                    Text = text,
-                    FontSize = 11,
-                    Foreground = B(CLabel)
-                }
-            };
-            if (enabled)
-            {
-                b.MouseEnter += delegate { b.Background = B(CBtnHover); };
-                b.MouseLeave += delegate { b.Background = B(CBtn); };
-                b.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; onClick(); };
+                    Width = Tokens.Space2, Height = Tokens.Space2,
+                    Fill = Ui.Br(accent),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    HorizontalAlignment = HorizontalAlignment.Left
+                };
+                Grid.SetColumn(dot, 0);
+                g.Children.Add(dot);
             }
-            return b;
+
+            AddCell(g, 1, Ui.Text(item.Idx, TextStyle.Caption), HorizontalAlignment.Left);
+
+            var title = Ui.Text(item.Title, TextStyle.Body, isRead ? p.TextSecondary : p.TextPrimary);
+            if (!isRead) title.FontWeight = FontWeights.SemiBold;
+            title.Margin = new Thickness(0, 0, Tokens.Space2, 0);
+            AddCell(g, 2, title, HorizontalAlignment.Left);
+
+            AddCell(g, 3, Ui.Text(item.Date, TextStyle.Caption), HorizontalAlignment.Right);
+
+            string name = (isRead ? "" : Text.T("안 읽음, ", "Unread, ")) + item.Title + ", " + item.Date;
+            var captured = item;
+            var row = UiX.ListRow(g, RowHeight, name, delegate
+            {
+                OpenInBrowser(captured.Url);
+                _onMarkRead(_game.Id, captured.Idx);
+            });
+            row.ToolTip = item.Title;
+            return row;
+        }
+
+        private static Grid RowGrid()
+        {
+            var g = new Grid();
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(ColDot) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(ColIdx) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(ColDate) });
+            return g;
+        }
+
+        private static void AddCell(Grid g, int col, TextBlock t, HorizontalAlignment align)
+        {
+            t.HorizontalAlignment = align;
+            t.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(t, col);
+            g.Children.Add(t);
+        }
+
+        private FrameworkElement GameIcon(Color accent)
+        {
+            var logo = _getIcon(_game.Id);
+            var icon = logo != null ? Ui.Icon(logo, accent) : UiX.AccentIcon(accent, Glyphs.Mail);
+            if (logo != null)
+                icon.Clip = new RectangleGeometry(new Rect(0, 0, Tokens.IconSize, Tokens.IconSize), 6, 6);
+            return icon;
         }
 
         private static void OpenInBrowser(string url)
@@ -487,23 +335,9 @@ namespace PatchNoteMailbox.UI
             catch { }
         }
 
-        private static BitmapImage LoadBitmap(string path)
-        {
-            try
-            {
-                var bmp = new BitmapImage();
-                bmp.BeginInit();
-                bmp.CacheOption = BitmapCacheOption.OnLoad;
-                bmp.UriSource = new Uri(path, UriKind.Absolute);
-                bmp.EndInit();
-                bmp.Freeze();
-                return bmp;
-            }
-            catch { return null; }
-        }
-
         private void OnSourceInitialized(object sender, EventArgs e)
         {
+            // Keep the popover out of the taskbar and Alt+Tab, like the dock (C10).
             var h = new WindowInteropHelper(this).Handle;
             SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h, GWL_EXSTYLE) | WS_EX_TOOLWINDOW);
         }

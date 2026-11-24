@@ -1,62 +1,56 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
-using System.Runtime.InteropServices;
+using System.Globalization;
+using System.Net;
+using System.Net.Http;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Input;
-using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
-using System.Windows.Media.Effects;
-using System.Windows.Media.Imaging;
 using System.Windows.Threading;
-using Microsoft.Win32;
+using Bwui;
 using PatchNoteMailbox.Models;
 using PatchNoteMailbox.Services;
 
 namespace PatchNoteMailbox.UI
 {
-    public class DockWindow : Window
+    /// <summary>
+    /// The desktop dock: one tile per game with an unread badge, and a toggle that collapses the
+    /// drawer into a single mailbox tile. BwuiWindow provides the card, desktop pinning, placement,
+    /// the standard menu block, theme and --snapshot.
+    /// </summary>
+    public class DockWindow : BwuiWindow
     {
-        private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-        private const string AppName = "PatchNoteMailbox";
-        private const double CardMargin = 16;
-        private const double CardPadding = 10;
-        private const double SlotSize = 46;
-        private const double SlotSpacing = 8;
-        private const double ToggleSize = 44;
+        // Widget accent (mailbox red). Light 5.4:1 / dark 6.4:1 on Surface, and the badge's Surface-colored
+        // count reaches the same ratios on it, so it also passes as a text background (C2).
+        private static readonly Color AccentLight = Palette.Hex("#C4314B"), AccentDark = Palette.Hex("#FF8A95");
+        public static Color Accent { get { return Theme.Current.Accent(AccentLight, AccentDark); } }
 
-        private static Color C(string hex) { return (Color)ColorConverter.ConvertFromString(hex); }
-        private static Brush B(Color c) { var b = new SolidColorBrush(c); b.Freeze(); return b; }
-
-        private static readonly Color CText = C("#1F1E1C");
-        private static readonly Color CLabel = C("#6B6962");
-        private static readonly Color CSep = C("#EFEDE7");
-        private static readonly Color CDanger = C("#E24B4A");
-        private static readonly Color CBtn = C("#F4F3EF");
-        private static readonly Color CBtnHover = C("#E9E7E0");
+        private const double Tile = 40;                 // game tile and toggle cell, 10 × 4px
+        private const double TileGap = Tokens.Space2;    // between game tiles
+        private static readonly string[] Directions = { "up", "right", "down", "left" };   // menu cycles clockwise
 
         private readonly StorageService _storage;
         private readonly PatchNoteFetcher _fetcher;
-        private List<GameConfig> _games;
-        private AppState _state;
+        private readonly List<GameConfig> _games;
+        private readonly AppState _state;
+        private readonly PopoverWindow _popover;
+        private readonly Dictionary<string, ImageSource> _icons = new Dictionary<string, ImageSource>();
+        private readonly HashSet<string> _inFlight = new HashSet<string>();
+        private readonly Dictionary<string, string> _errors = new Dictionary<string, string>();
 
-        private Grid _canvasGrid;
-        private Border _card;
-        private StackPanel _rootPanel;
-        private Border _gamesClip;
-        private StackPanel _gamesPanel;
-        private Border _divider;
-        private Grid _toggleSlot;
-        private PopoverWindow _popover;
-        private DispatcherTimer _pollTimer;
-        private bool _loaded;
+        private DockPanel _root;          // the element Build() returned last; animated on collapse/expand
+        private FrameworkElement _drawer; // game tiles + divider
         private bool _animating;
+        private DispatcherTimer _timer;
+        private bool _snapshotPopover;
 
         public DockWindow(StorageService storage, PatchNoteFetcher fetcher)
+            : base(Program.AppId, Text.T("게임 패치노트 우편함", "Game patch note mailbox"))
         {
             _storage = storage;
             _fetcher = fetcher;
@@ -64,101 +58,622 @@ namespace PatchNoteMailbox.UI
             _state = _storage.LoadState();
             _state.ExpandDirection = NormalizeDirection(_state.ExpandDirection);
 
-            Title = "게임 패치노트 우편함";
-            WindowStyle = WindowStyle.None;
-            AllowsTransparency = true;
-            Background = Brushes.Transparent;
-            ShowInTaskbar = false;
-            ResizeMode = ResizeMode.NoResize;
+            _popover = new PopoverWindow(OnMarkRead, OnMarkAllRead, OnRefreshSingleGame, GetIcon);
+
+            if (App.IsSnapshot)
+            {
+                UseSnapshotData();
+                Render();
+                return;
+            }
+
+            // The window is sized for the expanded dock and the card sits on the anchored edge inside it,
+            // so collapse/expand animates the card only and the window never moves or resizes mid-animation.
+            var host = new Grid();
+            Content = null;
+            host.Children.Add(Card);
+            Content = host;
             SizeToContent = SizeToContent.Manual;
-            MinWidth = 0;
-            MinHeight = 0;
-            WindowStartupLocation = WindowStartupLocation.Manual;
-            FontFamily = new FontFamily("Segoe UI Variable Text, Segoe UI, Malgun Gothic");
-            UseLayoutRounding = true;
+            ApplyAnchors();
+            ApplyWindowSize();
+            MigratePosition();
+            Render();
 
-            _canvasGrid = new Grid { Background = Brushes.Transparent };
-
-            _card = new Border
+            _popover.IsVisibleChanged += delegate { RenderDock(); };
+            Loaded += delegate { StartPolling(); };
+            Closing += delegate
             {
-                Background = Brushes.White,
-                CornerRadius = new CornerRadius(22),
-                Margin = new Thickness(CardMargin),
-                Padding = new Thickness(CardPadding),
-                Effect = new DropShadowEffect
-                {
-                    BlurRadius = 18,
-                    ShadowDepth = 3,
-                    Direction = 270,
-                    Opacity = 0.16,
-                    Color = C("#1E283C")
-                }
+                if (_timer != null) _timer.Stop();
+                _popover.Close();
             };
-
-            _rootPanel = new StackPanel();
-            _gamesPanel = new StackPanel();
-            _gamesClip = new Border { ClipToBounds = true, Child = _gamesPanel };
-            _divider = new Border { Background = B(CSep) };
-            _toggleSlot = new Grid { Width = ToggleSize, Height = ToggleSize, Cursor = Cursors.Hand };
-
-            _card.Child = _rootPanel;
-            _canvasGrid.Children.Add(_card);
-            Content = _canvasGrid;
-
-            _card.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e)
-            {
-                try { DragMove(); } catch { }
-                SavePosition();
-            };
-
-            _popover = new PopoverWindow(
-                OnMarkRead,
-                OnMarkAllRead,
-                OnRefreshSingleGame,
-                delegate(string id) { return _storage.GetLocalIconPath(id); });
-
-            ContextMenu = BuildContextMenu();
-            ApplyFixedWindowDimensions();
-            RenderDock(true);
-
-            // Sit cleanly on the Windows desktop just like AiUsageWidget
-            try { new WindowInteropHelper(this).Owner = FindWindow("Progman", null); } catch { }
-            SourceInitialized += OnSourceInitialized;
-            Loaded += OnLoaded;
-            Closing += OnClosing;
         }
+
+        // ---------- direction & geometry ----------
+
+        private string Dir { get { return _state.ExpandDirection; } }
+        private bool IsVertical { get { return Dir == "up" || Dir == "down"; } }
 
         private static string NormalizeDirection(string dir)
         {
             string d = (dir ?? "up").Trim().ToLowerInvariant();
-            if (d == "down" || d == "left" || d == "right") return d;
-            return "up";
+            return Array.IndexOf(Directions, d) >= 0 ? d : "up";
         }
 
-        private bool IsVerticalDir()
+        /// <summary>The toggle stays on the anchored edge; the drawer grows away from it (DESIGN.md §6.2).</summary>
+        private void ApplyAnchors()
         {
-            string d = NormalizeDirection(_state.ExpandDirection);
-            return d == "up" || d == "down";
+            AnchorBottom = Dir != "down";
+            AnchorRight = Dir != "right";
         }
 
-        private bool IsToggleFirst()
+        /// <summary>Length of the game drawer: tiles, the gaps between them, and a divider with Space3 on each side.</summary>
+        private double DrawerExtent()
         {
-            string d = NormalizeDirection(_state.ExpandDirection);
-            return d == "down" || d == "right";
+            int n = _games.Count;
+            if (n == 0) return 0;
+            return n * Tile + (n - 1) * TileGap + 2 * Tokens.Space3 + 1;
         }
 
-        public static void RenderSnapshot(StorageService storage, PatchNoteFetcher fetcher, string outPath, string mode)
+        private void ApplyWindowSize()
         {
-            var games = storage.LoadGames();
-            foreach (var g in games)
+            double frame = 2 * (Tokens.ShadowRoom + Tokens.CardPadding);
+            double shortSide = Tile + frame;
+            double longSide = Tile + DrawerExtent() + frame;
+            if (IsVertical)
             {
-                try { fetcher.EnsureIconCachedAsync(g, storage).Wait(); } catch { }
+                Width = shortSide;
+                Height = longSide;
+                Card.HorizontalAlignment = HorizontalAlignment.Center;
+                Card.VerticalAlignment = Dir == "up" ? VerticalAlignment.Bottom : VerticalAlignment.Top;
+            }
+            else
+            {
+                Width = longSide;
+                Height = shortSide;
+                Card.HorizontalAlignment = Dir == "left" ? HorizontalAlignment.Right : HorizontalAlignment.Left;
+                Card.VerticalAlignment = VerticalAlignment.Center;
+            }
+        }
+
+        /// <summary>Center of the toggle relative to the window's top-left, for a direction.</summary>
+        private Point ToggleCenter(string dir)
+        {
+            double edge = Tokens.ShadowRoom + Tokens.CardPadding + Tile / 2;
+            double shortSide = Tile + 2 * (Tokens.ShadowRoom + Tokens.CardPadding);
+            double drawer = DrawerExtent();
+            if (dir == "up") return new Point(shortSide / 2, drawer + edge);
+            if (dir == "down") return new Point(shortSide / 2, edge);
+            if (dir == "left") return new Point(drawer + edge, shortSide / 2);
+            return new Point(edge, shortSide / 2);
+        }
+
+        /// <summary>The same point for the pre-BWUI window (slot 46, gap 8, toggle 44, padding 10, margin 16).</summary>
+        private static Point LegacyToggleCenter(string dir, int games)
+        {
+            double drawer = games * (46 + 8) + 9;
+            double shortSide = 46 + 10 * 2 + 16 * 2;
+            double edge = 16 + 10 + 44 / 2.0;
+            if (dir == "up") return new Point(shortSide / 2, drawer + edge);
+            if (dir == "down") return new Point(shortSide / 2, edge);
+            if (dir == "left") return new Point(drawer + edge, shortSide / 2);
+            return new Point(edge, shortSide / 2);
+        }
+
+        /// <summary>
+        /// First run after the move to BWUI: settings.txt has no position yet, so take the old one from
+        /// state.json, shifted so the toggle button stays exactly where the user left it.
+        /// </summary>
+        private void MigratePosition()
+        {
+            if (Settings.GetDouble("left").HasValue && Settings.GetDouble("top").HasValue) return;
+            if (_state.DockLeft == -1 && _state.DockTop == -1) return;
+            Point oldC = LegacyToggleCenter(Dir, _games.Count);
+            Point newC = ToggleCenter(Dir);
+            double l = Math.Round(_state.DockLeft + oldC.X - newC.X, 1);
+            double t = Math.Round(_state.DockTop + oldC.Y - newC.Y, 1);
+            Settings.SetDouble("left", l);
+            Settings.SetDouble("top", t);
+            Left = l;
+            Top = t;
+        }
+
+        private void CycleDirection()
+        {
+            if (_animating) return;
+            string oldDir = Dir;
+            string next = Directions[(Array.IndexOf(Directions, oldDir) + 1) % Directions.Length];
+            if (_popover.IsVisible) _popover.Hide();
+
+            // Keep the toggle button still on screen while the dock turns around it.
+            Point oldC = ToggleCenter(oldDir);
+            double ax = Left + oldC.X, ay = Top + oldC.Y;
+
+            _state.ExpandDirection = next;
+            SaveState();
+            AnchorRight = AnchorBottom = false;   // placed by hand below, not by BWUI's anchoring
+            ApplyWindowSize();
+            Render();
+            UpdateLayout();
+
+            Point newC = ToggleCenter(next);
+            double nl = ax - newC.X, nt = ay - newC.Y;
+            var vs = new Rect(SystemParameters.VirtualScreenLeft, SystemParameters.VirtualScreenTop,
+                              SystemParameters.VirtualScreenWidth, SystemParameters.VirtualScreenHeight);
+            if (nl + Width > vs.Right) nl = vs.Right - Width;
+            if (nt + Height > vs.Bottom) nt = vs.Bottom - Height;
+            if (nl < vs.Left) nl = vs.Left;
+            if (nt < vs.Top) nt = vs.Top;
+            Left = nl;
+            Top = nt;
+            SavePosition();
+            Dispatcher.BeginInvoke(new Action(ApplyAnchors), DispatcherPriority.ContextIdle);
+        }
+
+        // ---------- build ----------
+
+        /// <summary>Render unless an animation is running; the animation renders when it ends.</summary>
+        private void RenderDock()
+        {
+            if (!_animating) Render();
+        }
+
+        protected override UIElement Build()
+        {
+            if (_snapshotPopover)
+            {
+                var g = _games[0];
+                return _popover.BuildContent(g, Entry(g.Id), StatusOf(g.Id));
             }
 
-            var w = new DockWindow(storage, fetcher);
-            w._state.ExpandDirection = "up";
-            // Always use clean showcase unread state in snapshot previews (does not save to disk)
-            w._state.Cache["lostark"] = new GameCacheEntry
+            var root = new DockPanel { LastChildFill = true };
+            var toggle = BuildToggle();
+            DockPanel.SetDock(toggle, Dir == "up" ? Dock.Bottom : Dir == "down" ? Dock.Top : Dir == "left" ? Dock.Right : Dock.Left);
+            root.Children.Add(toggle);
+
+            var drawer = BuildDrawer();
+            if (_state.IsCollapsed) drawer.Visibility = Visibility.Collapsed;
+            root.Children.Add(drawer);
+
+            double extent = Tile + (_state.IsCollapsed ? 0 : DrawerExtent());
+            root.Width = IsVertical ? Tile : extent;
+            root.Height = IsVertical ? extent : Tile;
+
+            _root = root;
+            _drawer = drawer;
+            return root;
+        }
+
+        private FrameworkElement BuildDrawer()
+        {
+            var p = Theme.Current;
+            bool vert = IsVertical;
+            bool toggleFirst = Dir == "down" || Dir == "right";
+            var panel = new StackPanel { Orientation = vert ? Orientation.Vertical : Orientation.Horizontal };
+            // While the drawer is squeezed during the animation, keep the end next to the toggle in view.
+            if (vert) panel.VerticalAlignment = Dir == "up" ? VerticalAlignment.Bottom : VerticalAlignment.Top;
+            else panel.HorizontalAlignment = Dir == "left" ? HorizontalAlignment.Right : HorizontalAlignment.Left;
+            if (_games.Count == 0) return panel;
+
+            var divider = new Border
+            {
+                Background = Ui.Br(p.Divider),
+                Width = vert ? Tile : 1,
+                Height = vert ? 1 : Tile,
+                Margin = vert ? new Thickness(0, Tokens.Space3, 0, Tokens.Space3) : new Thickness(Tokens.Space3, 0, Tokens.Space3, 0)
+            };
+
+            if (toggleFirst) panel.Children.Add(divider);
+            for (int i = 0; i < _games.Count; i++)
+            {
+                double lead = i == 0 ? 0 : TileGap;
+                var m = vert ? new Thickness(0, lead, 0, 0) : new Thickness(lead, 0, 0, 0);
+                panel.Children.Add(BuildGameTile(_games[i], m));
+            }
+            if (!toggleFirst) panel.Children.Add(divider);
+            return panel;
+        }
+
+        private FrameworkElement BuildGameTile(GameConfig game, Thickness margin)
+        {
+            var p = Theme.Current;
+            int unread = UnreadCount(game.Id);
+            var status = StatusOf(game.Id);
+            bool active = _popover.IsVisible && _popover.ActiveGameId == game.Id;
+            var entry = Entry(game.Id);
+            bool hasNotes = entry.Notes != null && entry.Notes.Count > 0;
+
+            var slot = new Grid { Width = Tile, Height = Tile, Margin = margin, Cursor = Cursors.Hand, Background = Brushes.Transparent };
+            var radius = new CornerRadius(Tokens.InnerRadius);
+            var tile = new Border { CornerRadius = radius, Background = Ui.Br(p.SurfaceSubtle) };
+            if (p.IsHighContrast) { tile.BorderBrush = Ui.Br(p.Border); tile.BorderThickness = new Thickness(1); }
+
+            var logo = GetIcon(game.Id);
+            if (logo != null)
+            {
+                var img = new Image
+                {
+                    Source = logo,
+                    Stretch = Stretch.UniformToFill,
+                    Width = Tile, Height = Tile,
+                    Clip = new RectangleGeometry(new Rect(0, 0, Tile, Tile), Tokens.InnerRadius, Tokens.InnerRadius)
+                };
+                RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
+                slot.Children.Add(tile);
+                slot.Children.Add(img);
+            }
+            else
+            {
+                // No logo yet (first run, or the download failed): the first two letters of the name.
+                var initials = Ui.Text(game.Name.Length >= 2 ? game.Name.Substring(0, 2) : game.Name, TextStyle.Title);
+                initials.HorizontalAlignment = HorizontalAlignment.Center;
+                initials.VerticalAlignment = VerticalAlignment.Center;
+                tile.Child = initials;
+                slot.Children.Add(tile);
+            }
+
+            // The open game gets a 2px TextPrimary ring: a shape cue, not a color change.
+            if (active)
+                slot.Children.Add(new Border { CornerRadius = radius, BorderBrush = Ui.Br(p.TextPrimary), BorderThickness = new Thickness(2), IsHitTestVisible = false });
+
+            if (unread > 0)
+            {
+                var badge = UiX.CountBadge(unread, Accent);
+                badge.Margin = new Thickness(0, -Tokens.Space1, -Tokens.Space1, 0);
+                slot.Children.Add(badge);
+            }
+            else if (status.Error != null && !hasNotes)
+            {
+                var mark = UiX.StatusMark(Status.Caution);
+                mark.Margin = new Thickness(0, 0, -Tokens.Space1, -Tokens.Space1);
+                slot.Children.Add(mark);
+            }
+
+            // Tooltip / accessible name: name, unread count, data age when stale, last error.
+            string tip = game.Name;
+            if (unread > 0) tip += Text.T(" · 안 읽음 " + unread + "개", " · " + unread + " unread");
+            if (hasNotes && status.Fresh.Caption != null) tip += " · " + status.Fresh.Caption;
+            if (status.Error != null) tip += "\n" + status.Error;
+            slot.ToolTip = tip;
+            AutomationProperties.SetName(slot, tip);
+
+            var captured = game;
+            slot.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; };
+            slot.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+            {
+                e.Handled = true;
+                OnGameIconClicked(captured);
+            };
+            return slot;
+        }
+
+        private FrameworkElement BuildToggle()
+        {
+            var cell = new Grid { Width = Tile, Height = Tile };
+            if (_state.IsCollapsed)
+            {
+                // Collapsed: the whole widget is one mailbox tile with the total unread count.
+                int total = TotalUnread();
+                string tip = Text.T("패치노트 우편함", "Patch note mailbox")
+                    + (total > 0 ? Text.T(" · 안 읽은 소식 " + total + "개", " · " + total + " unread") : "")
+                    + Text.T(" (클릭해서 펼치기)", " (click to expand)");
+                var btn = Ui.IconButton(UiX.AccentIcon(Accent, Glyphs.Mail), tip, ToggleCollapse);
+                btn.Width = Tile;
+                btn.Height = Tile;
+                btn.CornerRadius = new CornerRadius(Tokens.InnerRadius);
+                cell.Children.Add(btn);
+                if (total > 0)
+                {
+                    var badge = UiX.CountBadge(total, Accent);
+                    badge.Margin = new Thickness(0, -Tokens.Space1, -Tokens.Space1, 0);
+                    cell.Children.Add(badge);
+                }
+            }
+            else
+            {
+                string chevron = Dir == "down" ? UiX.ChevronUp : Dir == "left" ? UiX.ChevronRight : Dir == "right" ? UiX.ChevronLeft : UiX.ChevronDown;
+                var btn = Ui.IconButton(chevron, Text.T("우편함 접기", "Collapse"), ToggleCollapse);
+                btn.HorizontalAlignment = HorizontalAlignment.Center;
+                btn.VerticalAlignment = VerticalAlignment.Center;
+                cell.Children.Add(btn);
+            }
+            return cell;
+        }
+
+        // ---------- collapse / expand ----------
+
+        private void ToggleCollapse()
+        {
+            if (_animating || _root == null) return;
+            bool collapsing = !_state.IsCollapsed;
+            if (collapsing && _popover.IsVisible) _popover.Hide();
+
+            _state.IsCollapsed = collapsing;
+            _animating = true;
+
+            // Swap the toggle (chevron ↔ mailbox) right away, then slide the drawer.
+            var root = _root;
+            var drawer = _drawer;
+            var oldToggle = root.Children[0];
+            var toggle = BuildToggle();
+            DockPanel.SetDock(toggle, DockPanel.GetDock(oldToggle));
+            root.Children.RemoveAt(0);
+            root.Children.Insert(0, toggle);
+            drawer.Visibility = Visibility.Visible;
+
+            double full = Tile + DrawerExtent();
+            var ease = new CubicEase { EasingMode = collapsing ? EasingMode.EaseInOut : EasingMode.EaseOut };
+            var size = new DoubleAnimation
+            {
+                From = collapsing ? full : Tile,
+                To = collapsing ? Tile : full,
+                Duration = TimeSpan.FromMilliseconds(collapsing ? 190 : 210),
+                EasingFunction = ease
+            };
+            var fade = new DoubleAnimation
+            {
+                From = collapsing ? 1.0 : 0.0,
+                To = collapsing ? 0.0 : 1.0,
+                Duration = TimeSpan.FromMilliseconds(150),
+                EasingFunction = ease
+            };
+            size.Completed += delegate
+            {
+                _animating = false;
+                SaveState();
+                Render();
+            };
+            root.BeginAnimation(IsVertical ? HeightProperty : WidthProperty, size);
+            drawer.BeginAnimation(OpacityProperty, fade);
+        }
+
+        // ---------- menu (DESIGN.md §6.3): widget items, then BWUI's block ----------
+
+        protected override void AddMenuItems(ContextMenu menu)
+        {
+            menu.Items.Add(Item(_state.IsCollapsed ? Text.T("우편함 펼치기", "Expand") : Text.T("우편함 접기", "Collapse"), ToggleCollapse));
+            menu.Items.Add(Item(DirectionItem(Dir), CycleDirection));
+            menu.Items.Add(Item(Text.T("games.json 열기", "Open games.json"), OpenGamesJson));
+        }
+
+        private static string DirectionItem(string dir)
+        {
+            string v = dir == "down" ? Text.T("아래로", "Down")
+                : dir == "left" ? Text.T("왼쪽으로", "Left")
+                : dir == "right" ? Text.T("오른쪽으로", "Right")
+                : Text.T("위로", "Up");
+            return Text.T("펼치는 방향: ", "Expand direction: ") + v;
+        }
+
+        private void OpenGamesJson()
+        {
+            try { Process.Start("notepad.exe", "\"" + System.IO.Path.Combine(_storage.BaseDir, "games.json") + "\""); }
+            catch { }
+        }
+
+        protected override bool CanRefresh { get { return true; } }
+        protected override void RefreshNow() { RefreshAll(); }
+
+        // ---------- popover ----------
+
+        private void OnGameIconClicked(GameConfig game)
+        {
+            if (_popover.IsVisible && _popover.ActiveGameId == game.Id)
+            {
+                _popover.Hide();
+                return;
+            }
+            _popover.ShowForGame(game, Entry(game.Id), StatusOf(game.Id), this, Dir);
+            RenderDock();
+        }
+
+        private void OnMarkRead(string gameId, string idx)
+        {
+            var entry = Entry(gameId);
+            if (!entry.ReadIds.Contains(idx))
+            {
+                entry.ReadIds.Add(idx);
+                SaveState();
+            }
+            UpdateViews(gameId);
+        }
+
+        private void OnMarkAllRead(string gameId)
+        {
+            var entry = Entry(gameId);
+            foreach (var n in entry.Notes)
+            {
+                if (!entry.ReadIds.Contains(n.Idx)) entry.ReadIds.Add(n.Idx);
+            }
+            SaveState();
+            UpdateViews(gameId);
+        }
+
+        private void OnRefreshSingleGame(string gameId)
+        {
+            foreach (var g in _games)
+            {
+                if (g.Id == gameId) { var t = RefreshGameAsync(g); break; }
+            }
+        }
+
+        private void UpdateViews(string gameId)
+        {
+            RenderDock();
+            if (_popover.IsVisible && _popover.ActiveGameId == gameId)
+                _popover.RefreshView(Entry(gameId), StatusOf(gameId));
+        }
+
+        // ---------- fetching (DESIGN.md §6.4) ----------
+
+        /// <summary>The shortest poll interval in games.json, never under 5 minutes (C12). Doubled on battery (C16).</summary>
+        private TimeSpan PollInterval()
+        {
+            int min = 60;
+            bool any = false;
+            foreach (var g in _games)
+            {
+                if (g.PollIntervalMinutes <= 0) continue;
+                min = any ? Math.Min(min, g.PollIntervalMinutes) : g.PollIntervalMinutes;
+                any = true;
+            }
+            return App.Interval(TimeSpan.FromMinutes(Math.Max(5, min)));
+        }
+
+        private TimeSpan StaleAfter { get { return TimeSpan.FromTicks(PollInterval().Ticks * 2) + TimeSpan.FromMinutes(2); } }
+        private static readonly TimeSpan ExpireAfter = TimeSpan.FromDays(1);
+
+        private void StartPolling()
+        {
+            // First fetch a few seconds after start, never during construction.
+            _timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+            _timer.Tick += delegate
+            {
+                _timer.Interval = PollInterval();
+                RefreshAll();
+            };
+            _timer.Start();
+        }
+
+        private async void RefreshAll()
+        {
+            foreach (var g in _games.ToArray())
+                await RefreshGameAsync(g);
+        }
+
+        private async Task RefreshGameAsync(GameConfig game)
+        {
+            if (_inFlight.Contains(game.Id)) return;   // one fetch per source at a time
+            _inFlight.Add(game.Id);
+            UpdateViews(game.Id);
+            try
+            {
+                var storage = _storage;
+                var fetcher = _fetcher;
+                // Network and parsing run on the thread pool; the UI thread only renders.
+                await Task.Run(() => fetcher.EnsureIconCachedAsync(game, storage));
+                _icons.Remove(game.Id);
+                var fetched = await Task.Run(() => fetcher.FetchAsync(game));
+
+                var entry = Entry(game.Id);
+                if (fetched != null && fetched.Count > 0) entry.Notes = fetched;
+                entry.LastFetchedAt = DateTime.Now.ToString("HH:mm");
+                entry.FetchedAtUtc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+                _errors.Remove(game.Id);
+                SaveState();
+            }
+            catch (Exception ex)
+            {
+                _errors[game.Id] = DescribeError(ex);
+            }
+            finally
+            {
+                _inFlight.Remove(game.Id);
+            }
+            UpdateViews(game.Id);
+        }
+
+        /// <summary>A reason the user can act on (DESIGN.md §5 Error).</summary>
+        private static string DescribeError(Exception ex)
+        {
+            var agg = ex as AggregateException;
+            if (agg != null && agg.InnerException != null) ex = agg.GetBaseException();
+            if (ex is HttpRequestException || ex is WebException || ex is TaskCanceledException)
+                return Text.T("사이트에 연결할 수 없어요. 인터넷 연결을 확인해 주세요.", "Can't reach the site. Check your internet connection.");
+            if (ex is NotSupportedException)
+                return Text.T("games.json의 provider.type을 확인해 주세요.", "Check provider.type in games.json.");
+            return Text.T("패치노트를 읽지 못했어요. games.json 설정을 확인해 주세요.", "Couldn't read the patch notes. Check games.json.");
+        }
+
+        // ---------- state ----------
+
+        private GameCacheEntry Entry(string gameId)
+        {
+            GameCacheEntry entry;
+            if (!_state.Cache.TryGetValue(gameId, out entry) || entry == null)
+            {
+                entry = new GameCacheEntry();
+                _state.Cache[gameId] = entry;
+            }
+            if (entry.Notes == null) entry.Notes = new List<PatchNoteItem>();
+            if (entry.ReadIds == null) entry.ReadIds = new List<string>();
+            return entry;
+        }
+
+        private GameStatus StatusOf(string gameId)
+        {
+            var entry = Entry(gameId);
+            DateTime? at = null;
+            DateTime parsed;
+            if (!string.IsNullOrEmpty(entry.FetchedAtUtc) &&
+                DateTime.TryParse(entry.FetchedAtUtc, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out parsed))
+                at = parsed.ToUniversalTime();
+            string err;
+            _errors.TryGetValue(gameId, out err);
+            return new GameStatus
+            {
+                Loading = _inFlight.Contains(gameId),
+                Error = err,
+                Fresh = Freshness.Of(at, StaleAfter, ExpireAfter)
+            };
+        }
+
+        private int UnreadCount(string gameId)
+        {
+            var entry = Entry(gameId);
+            var read = new HashSet<string>(entry.ReadIds);
+            int n = 0;
+            foreach (var note in entry.Notes)
+            {
+                if (!read.Contains(note.Idx)) n++;
+            }
+            return n;
+        }
+
+        private int TotalUnread()
+        {
+            int total = 0;
+            foreach (var g in _games) total += UnreadCount(g.Id);
+            return total;
+        }
+
+        private ImageSource GetIcon(string gameId)
+        {
+            ImageSource img;
+            if (_icons.TryGetValue(gameId, out img)) return img;
+            img = Ui.LoadPng(_storage.GetLocalIconPath(gameId));
+            if (img != null) _icons[gameId] = img;
+            return img;
+        }
+
+        private void SaveState()
+        {
+            if (App.IsSnapshot) return;
+            try { _storage.SaveState(_state); } catch { }
+        }
+
+        // ---------- snapshot (DESIGN.md §6.9) ----------
+
+        /// <summary>
+        /// Sample data for --snapshot, never saved. Extra args: collapsed | popover, an expand direction
+        /// (up | down | left | right, default up), and for checking the states: loading | error | stale | expired | empty.
+        /// </summary>
+        private void UseSnapshotData()
+        {
+            var extra = App.SnapshotArgs ?? new string[0];
+            Func<string, bool> has = delegate(string a) { return Array.IndexOf(extra, a) >= 0; };
+            _state.ExpandDirection = "up";
+            foreach (var d in Directions)
+                if (has(d)) _state.ExpandDirection = d;
+            _state.IsCollapsed = has("collapsed");
+            _snapshotPopover = has("popover") && _games.Count > 0;
+
+            DateTime at = DateTime.UtcNow.AddMinutes(-3);
+            if (has("stale")) at = DateTime.UtcNow.AddHours(-5);
+            if (has("expired")) at = DateTime.UtcNow.AddDays(-2);
+            string fetchedAt = at.ToString("o", CultureInfo.InvariantCulture);
+
+            _state.Cache.Clear();
+            _state.Cache["lostark"] = new GameCacheEntry
             {
                 Notes = new List<PatchNoteItem>
                 {
@@ -170,765 +685,26 @@ namespace PatchNoteMailbox.UI
                     new PatchNoteItem { Idx = "13545", Title = "9월 16일(수) 업데이트 내역 안내", Date = "2026.09.16" },
                     new PatchNoteItem { Idx = "13542", Title = "9월 9일(수) 업데이트 내역 안내", Date = "2026.09.09" }
                 },
-                ReadIds = new List<string> { "13578", "13565", "13551", "13545", "13542" }
+                ReadIds = new List<string> { "13578", "13565", "13551", "13545", "13542" },
+                FetchedAtUtc = fetchedAt
             };
-            w._state.Cache["lol"] = new GameCacheEntry
+            _state.Cache["lol"] = new GameCacheEntry
             {
                 Notes = new List<PatchNoteItem>
                 {
                     new PatchNoteItem { Idx = "26.23", Title = "리그 오브 레전드 26.23 패치 노트", Date = "2026.11.18" },
                     new PatchNoteItem { Idx = "26.22", Title = "리그 오브 레전드 26.22 패치 노트", Date = "2026.11.04" }
                 },
-                ReadIds = new List<string> { "26.22" }
+                ReadIds = new List<string> { "26.22" },
+                FetchedAtUtc = fetchedAt
             };
 
-            FrameworkElement target;
-            if (mode == "popover")
-            {
-                var g = games[0];
-                GameCacheEntry cache;
-                if (!w._state.Cache.TryGetValue(g.Id, out cache)) cache = new GameCacheEntry();
-                target = w._popover.DetachCardForSnapshot(g, cache);
-            }
-            else
-            {
-                w._state.IsCollapsed = (mode == "collapsed");
-                w.ApplyFixedWindowDimensions();
-                w.RenderDock(true);
-                w._canvasGrid.Children.Remove(w._card);
-                w._card.HorizontalAlignment = HorizontalAlignment.Center;
-                w._card.VerticalAlignment = VerticalAlignment.Center;
-                target = w._card;
-            }
-
-            var desk = new Border
-            {
-                Background = new SolidColorBrush(C("#C9D6E3")),
-                Padding = new Thickness(24),
-                Child = target
-            };
-            desk.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-            desk.Arrange(new Rect(desk.DesiredSize));
-            desk.UpdateLayout();
-
-            int pw = (int)Math.Ceiling(desk.ActualWidth * 2);
-            int ph = (int)Math.Ceiling(desk.ActualHeight * 2);
-            var rtb = new RenderTargetBitmap(pw, ph, 192, 192, PixelFormats.Pbgra32);
-            rtb.Render(desk);
-            var enc = new PngBitmapEncoder();
-            enc.Frames.Add(BitmapFrame.Create(rtb));
-            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(outPath)));
-            using (var fs = File.Create(outPath)) enc.Save(fs);
+            if (_games.Count == 0) return;
+            string first = _games[0].Id;
+            if (has("loading") || has("error") || has("empty"))
+                _state.Cache[first] = new GameCacheEntry { FetchedAtUtc = has("empty") ? fetchedAt : "" };
+            if (has("loading")) _inFlight.Add(first);
+            if (has("error")) _errors[first] = DescribeError(new HttpRequestException());
         }
-
-        private double GetExpandedDrawerExtent()
-        {
-            // Each game slot (46) + spacing (8) + divider (1) + divider margin (8)
-            return _games.Count * (SlotSize + SlotSpacing) + 9;
-        }
-
-        private void ApplyFixedWindowDimensions()
-        {
-            string dir = NormalizeDirection(_state.ExpandDirection);
-            double drawerExtent = GetExpandedDrawerExtent();
-            double shortSide = SlotSize + CardPadding * 2 + CardMargin * 2;
-            double longSide = drawerExtent + ToggleSize + CardPadding * 2 + CardMargin * 2;
-
-            if (dir == "up" || dir == "down")
-            {
-                Width = shortSide;
-                Height = longSide;
-                _card.HorizontalAlignment = HorizontalAlignment.Center;
-                _card.VerticalAlignment = (dir == "up") ? VerticalAlignment.Bottom : VerticalAlignment.Top;
-            }
-            else
-            {
-                Width = longSide;
-                Height = shortSide;
-                _card.HorizontalAlignment = (dir == "left") ? HorizontalAlignment.Right : HorizontalAlignment.Left;
-                _card.VerticalAlignment = VerticalAlignment.Center;
-            }
-        }
-
-        // Compute the toggle button's center relative to the Window's Top-Left
-        private Point GetToggleCenterOffset(string dir)
-        {
-            double drawerExtent = GetExpandedDrawerExtent();
-            double shortSide = SlotSize + CardPadding * 2 + CardMargin * 2;
-            double edgeToCenter = CardMargin + CardPadding + ToggleSize / 2.0;
-
-            if (dir == "up")
-                return new Point(shortSide / 2.0, drawerExtent + edgeToCenter);
-            if (dir == "down")
-                return new Point(shortSide / 2.0, edgeToCenter);
-            if (dir == "left")
-                return new Point(drawerExtent + edgeToCenter, shortSide / 2.0);
-            // right
-            return new Point(edgeToCenter, shortSide / 2.0);
-        }
-
-        private void SetExpandDirection(string newDir)
-        {
-            string oldDir = NormalizeDirection(_state.ExpandDirection);
-            string targetDir = NormalizeDirection(newDir);
-            if (oldDir == targetDir) return;
-
-            if (_popover.IsVisible) _popover.Hide();
-
-            // Keep the toggle button stationary on screen while switching direction
-            Point oldOffset = GetToggleCenterOffset(oldDir);
-            double anchorScreenX = Left + oldOffset.X;
-            double anchorScreenY = Top + oldOffset.Y;
-
-            _state.ExpandDirection = targetDir;
-            ApplyFixedWindowDimensions();
-            RenderDock(true);
-
-            Point newOffset = GetToggleCenterOffset(targetDir);
-            double nextLeft = anchorScreenX - newOffset.X;
-            double nextTop = anchorScreenY - newOffset.Y;
-
-            var vs = new Rect(SystemParameters.VirtualScreenLeft, SystemParameters.VirtualScreenTop,
-                              SystemParameters.VirtualScreenWidth, SystemParameters.VirtualScreenHeight);
-            if (nextLeft < vs.Left) nextLeft = vs.Left;
-            if (nextLeft + Width > vs.Right) nextLeft = vs.Right - Width;
-            if (nextTop < vs.Top) nextTop = vs.Top;
-            if (nextTop + Height > vs.Bottom) nextTop = vs.Bottom - Height;
-
-            Left = nextLeft;
-            Top = nextTop;
-            SavePosition();
-        }
-
-        private async void OnLoaded(object sender, RoutedEventArgs e)
-        {
-            RestorePosition();
-            _loaded = true;
-            SavePosition();
-            await RefreshAllAsync();
-
-            _pollTimer = new DispatcherTimer { Interval = TimeSpan.FromHours(1) };
-            _pollTimer.Tick += async delegate { await RefreshAllAsync(); };
-            _pollTimer.Start();
-        }
-
-        private void OnClosing(object sender, System.ComponentModel.CancelEventArgs e)
-        {
-            if (_pollTimer != null) _pollTimer.Stop();
-            SavePosition();
-            if (_popover != null) _popover.Close();
-        }
-
-        private void RestorePosition()
-        {
-            var vs = new Rect(SystemParameters.VirtualScreenLeft, SystemParameters.VirtualScreenTop,
-                              SystemParameters.VirtualScreenWidth, SystemParameters.VirtualScreenHeight);
-            bool hasSaved = !(_state.DockLeft == -1 && _state.DockTop == -1);
-            if (hasSaved && vs.Contains(new Point(_state.DockLeft + 30, _state.DockTop + 30)))
-            {
-                Left = _state.DockLeft;
-                Top = _state.DockTop;
-            }
-            else
-            {
-                // Place cleanly beside AiUsageWidget at bottom-right
-                Rect work = SystemParameters.WorkArea;
-                Left = work.Right - Width - 310;
-                Top = work.Bottom - Height - 12;
-            }
-        }
-
-        private void SavePosition()
-        {
-            if (!_loaded) return;
-            _state.DockLeft = Left;
-            _state.DockTop = Top;
-            _storage.SaveState(_state);
-        }
-
-        private void RenderDock(bool applyCollapsedImmediately)
-        {
-            bool isVert = IsVerticalDir();
-            bool toggleFirst = IsToggleFirst();
-
-            _rootPanel.Orientation = isVert ? Orientation.Vertical : Orientation.Horizontal;
-            _gamesPanel.Orientation = isVert ? Orientation.Vertical : Orientation.Horizontal;
-
-            // Arrange root children based on expand direction
-            _rootPanel.Children.Clear();
-            if (toggleFirst)
-            {
-                _rootPanel.Children.Add(_toggleSlot);
-                _rootPanel.Children.Add(_gamesClip);
-            }
-            else
-            {
-                _rootPanel.Children.Add(_gamesClip);
-                _rootPanel.Children.Add(_toggleSlot);
-            }
-
-            // Configure divider
-            _divider.Width = isVert ? 26 : 1;
-            _divider.Height = isVert ? 1 : 26;
-            _divider.HorizontalAlignment = HorizontalAlignment.Center;
-            _divider.VerticalAlignment = VerticalAlignment.Center;
-            if (toggleFirst)
-            {
-                _divider.Margin = isVert ? new Thickness(0, 8, 0, 0) : new Thickness(8, 0, 0, 0);
-            }
-            else
-            {
-                _divider.Margin = isVert ? new Thickness(0, 0, 0, 8) : new Thickness(0, 0, 8, 0);
-            }
-            if (_divider.Parent != null)
-            {
-                var parent = _divider.Parent as Panel;
-                if (parent != null) parent.Children.Remove(_divider);
-            }
-
-            // Populate game icons
-            _gamesPanel.Children.Clear();
-            if (toggleFirst)
-            {
-                _gamesPanel.Children.Add(_divider);
-            }
-
-            for (int i = 0; i < _games.Count; i++)
-            {
-                var game = _games[i];
-                int unread = GetUnreadCount(game.Id);
-                bool isActive = _popover.IsVisible && _popover.ActiveGameId == game.Id;
-
-                Thickness slotMargin;
-                if (toggleFirst)
-                    slotMargin = isVert ? new Thickness(0, SlotSpacing, 0, 0) : new Thickness(SlotSpacing, 0, 0, 0);
-                else
-                    slotMargin = isVert ? new Thickness(0, 0, 0, SlotSpacing) : new Thickness(0, 0, SlotSpacing, 0);
-
-                var slot = new Grid
-                {
-                    Width = SlotSize,
-                    Height = SlotSize,
-                    Margin = slotMargin,
-                    Cursor = Cursors.Hand,
-                    ToolTip = unread > 0
-                        ? string.Format("{0} (안 읽음 {1}개)", game.Name, unread)
-                        : game.Name
-                };
-
-                var iconContainer = new Border
-                {
-                    Width = 42,
-                    Height = 42,
-                    CornerRadius = new CornerRadius(11),
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    VerticalAlignment = VerticalAlignment.Center,
-                    BorderThickness = new Thickness(isActive ? 2 : 0),
-                    BorderBrush = isActive ? B(CText) : Brushes.Transparent,
-                    Background = B(CBtn)
-                };
-
-                string iconPath = _storage.GetLocalIconPath(game.Id);
-                if (File.Exists(iconPath))
-                {
-                    var bmp = LoadBitmap(iconPath);
-                    if (bmp != null)
-                    {
-                        var img = new Image
-                        {
-                            Source = bmp,
-                            Stretch = Stretch.UniformToFill,
-                            Width = 42,
-                            Height = 42,
-                            Clip = new RectangleGeometry(new Rect(0, 0, 42, 42), 11, 11)
-                        };
-                        RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
-                        iconContainer.Child = img;
-                    }
-                }
-                else
-                {
-                    string initials = game.Name.Length >= 2 ? game.Name.Substring(0, 2) : game.Name;
-                    iconContainer.Child = new TextBlock
-                    {
-                        Text = initials,
-                        Foreground = B(CText),
-                        FontWeight = FontWeights.SemiBold,
-                        FontSize = 12,
-                        HorizontalAlignment = HorizontalAlignment.Center,
-                        VerticalAlignment = VerticalAlignment.Center
-                    };
-                }
-
-                slot.Children.Add(iconContainer);
-                if (unread > 0)
-                {
-                    slot.Children.Add(CreateUnreadBadge(unread));
-                }
-
-                var captured = game;
-                slot.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs ev) { ev.Handled = true; };
-                slot.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs ev)
-                {
-                    ev.Handled = true;
-                    OnGameIconClicked(captured);
-                };
-
-                _gamesPanel.Children.Add(slot);
-            }
-
-            if (!toggleFirst)
-            {
-                _gamesPanel.Children.Add(_divider);
-            }
-
-            if (applyCollapsedImmediately)
-            {
-                _gamesClip.BeginAnimation(HeightProperty, null);
-                _gamesClip.BeginAnimation(WidthProperty, null);
-                _gamesClip.BeginAnimation(OpacityProperty, null);
-
-                double full = GetExpandedDrawerExtent();
-                if (isVert)
-                {
-                    _gamesClip.Width = double.NaN;
-                    _gamesClip.Height = _state.IsCollapsed ? 0 : full;
-                }
-                else
-                {
-                    _gamesClip.Height = double.NaN;
-                    _gamesClip.Width = _state.IsCollapsed ? 0 : full;
-                }
-                _gamesClip.Opacity = _state.IsCollapsed ? 0 : 1;
-            }
-
-            RenderToggleButton();
-        }
-
-        private string GetCollapseArrow()
-        {
-            string dir = NormalizeDirection(_state.ExpandDirection);
-            if (dir == "down") return "▲";
-            if (dir == "left") return "▶";
-            if (dir == "right") return "◀";
-            return "▼";
-        }
-
-        private void RenderToggleButton()
-        {
-            _toggleSlot.Children.Clear();
-            int totalUnread = GetTotalUnreadCount();
-
-            var btnBg = new Border
-            {
-                Width = 40,
-                Height = 40,
-                CornerRadius = new CornerRadius(12),
-                Background = B(CBtn),
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-
-            if (_state.IsCollapsed)
-            {
-                btnBg.Child = CreateMailboxGlyph();
-                _toggleSlot.ToolTip = totalUnread > 0
-                    ? string.Format("패치노트 우편함 (안 읽은 소식 {0}개 · 클릭해서 펼치기)", totalUnread)
-                    : "패치노트 우편함 (클릭해서 펼치기)";
-                _toggleSlot.Children.Add(btnBg);
-                if (totalUnread > 0)
-                {
-                    _toggleSlot.Children.Add(CreateUnreadBadge(totalUnread));
-                }
-            }
-            else
-            {
-                btnBg.Width = 32;
-                btnBg.Height = 32;
-                btnBg.CornerRadius = new CornerRadius(16);
-                btnBg.Child = new TextBlock
-                {
-                    Text = GetCollapseArrow(),
-                    FontSize = 10,
-                    Foreground = B(CLabel),
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    VerticalAlignment = VerticalAlignment.Center
-                };
-                _toggleSlot.ToolTip = "우편함 접기";
-                _toggleSlot.Children.Add(btnBg);
-            }
-
-            btnBg.MouseEnter += delegate { btnBg.Background = B(CBtnHover); };
-            btnBg.MouseLeave += delegate { btnBg.Background = B(CBtn); };
-            _toggleSlot.MouseLeftButtonDown -= OnToggleMouseDown;
-            _toggleSlot.MouseLeftButtonUp -= OnToggleMouseUp;
-            _toggleSlot.MouseLeftButtonDown += OnToggleMouseDown;
-            _toggleSlot.MouseLeftButtonUp += OnToggleMouseUp;
-        }
-
-        private void OnToggleMouseDown(object sender, MouseButtonEventArgs e)
-        {
-            e.Handled = true;
-        }
-
-        private void OnToggleMouseUp(object sender, MouseButtonEventArgs e)
-        {
-            e.Handled = true;
-            ToggleCollapse();
-        }
-
-        private void ToggleCollapse()
-        {
-            if (_animating) return;
-
-            _state.IsCollapsed = !_state.IsCollapsed;
-            if (_state.IsCollapsed && _popover.IsVisible)
-            {
-                _popover.Hide();
-            }
-
-            bool collapsing = _state.IsCollapsed;
-            bool isVert = IsVerticalDir();
-            double fullExtent = GetExpandedDrawerExtent();
-            DependencyProperty sizeProp = isVert ? HeightProperty : WidthProperty;
-
-            _animating = true;
-            RenderToggleButton();
-
-            var ease = new CubicEase { EasingMode = collapsing ? EasingMode.EaseInOut : EasingMode.EaseOut };
-            var dur = TimeSpan.FromMilliseconds(collapsing ? 190 : 210);
-
-            var sizeAnim = new DoubleAnimation
-            {
-                From = collapsing ? fullExtent : 0,
-                To = collapsing ? 0 : fullExtent,
-                Duration = dur,
-                EasingFunction = ease
-            };
-
-            var opacityAnim = new DoubleAnimation
-            {
-                From = collapsing ? 1.0 : 0.0,
-                To = collapsing ? 0.0 : 1.0,
-                Duration = TimeSpan.FromMilliseconds(150),
-                EasingFunction = ease
-            };
-
-            sizeAnim.Completed += delegate
-            {
-                _animating = false;
-                _storage.SaveState(_state);
-            };
-
-            _gamesClip.BeginAnimation(sizeProp, sizeAnim);
-            _gamesClip.BeginAnimation(OpacityProperty, opacityAnim);
-        }
-
-        private static UIElement CreateMailboxGlyph()
-        {
-            return new System.Windows.Shapes.Path
-            {
-                Data = Geometry.Parse("M 2,5 L 18,5 L 18,15 L 2,15 Z M 2,6 L 10,11.5 L 18,6"),
-                Stroke = B(CText),
-                StrokeThickness = 1.7,
-                StrokeLineJoin = PenLineJoin.Round,
-                StrokeStartLineCap = PenLineCap.Round,
-                StrokeEndLineCap = PenLineCap.Round,
-                Width = 20,
-                Height = 20,
-                Stretch = Stretch.Uniform,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-        }
-
-        private static Border CreateUnreadBadge(int count)
-        {
-            return new Border
-            {
-                MinWidth = 19,
-                Height = 19,
-                Padding = new Thickness(5, 0, 5, 0),
-                CornerRadius = new CornerRadius(9.5),
-                Background = B(CDanger),
-                BorderThickness = new Thickness(2),
-                BorderBrush = Brushes.White,
-                HorizontalAlignment = HorizontalAlignment.Right,
-                VerticalAlignment = VerticalAlignment.Top,
-                Margin = new Thickness(0, -2, -2, 0),
-                Child = new TextBlock
-                {
-                    Text = count > 99 ? "99+" : count.ToString(),
-                    Foreground = Brushes.White,
-                    FontSize = 10,
-                    FontWeight = FontWeights.Bold,
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    VerticalAlignment = VerticalAlignment.Center
-                }
-            };
-        }
-
-        private void OnGameIconClicked(GameConfig game)
-        {
-            if (_popover.IsVisible && _popover.ActiveGameId == game.Id)
-            {
-                _popover.Hide();
-                RenderDock(false);
-                return;
-            }
-
-            GameCacheEntry entry;
-            if (!_state.Cache.TryGetValue(game.Id, out entry))
-            {
-                entry = new GameCacheEntry();
-                _state.Cache[game.Id] = entry;
-            }
-
-            _popover.ShowForGame(game, entry, this, _state.ExpandDirection);
-            RenderDock(false);
-        }
-
-        private void OnMarkRead(string gameId, string idx)
-        {
-            GameCacheEntry entry;
-            if (!_state.Cache.TryGetValue(gameId, out entry)) return;
-            if (entry.ReadIds == null) entry.ReadIds = new List<string>();
-            if (!entry.ReadIds.Contains(idx))
-            {
-                entry.ReadIds.Add(idx);
-                _storage.SaveState(_state);
-            }
-            RenderDock(false);
-            _popover.RefreshView(entry);
-        }
-
-        private void OnMarkAllRead(string gameId)
-        {
-            GameCacheEntry entry;
-            if (!_state.Cache.TryGetValue(gameId, out entry)) return;
-            if (entry.ReadIds == null) entry.ReadIds = new List<string>();
-            if (entry.Notes != null)
-            {
-                for (int i = 0; i < entry.Notes.Count; i++)
-                {
-                    string id = entry.Notes[i].Idx;
-                    if (!entry.ReadIds.Contains(id)) entry.ReadIds.Add(id);
-                }
-            }
-            _storage.SaveState(_state);
-            RenderDock(false);
-            _popover.RefreshView(entry);
-        }
-
-        private async void OnRefreshSingleGame(string gameId)
-        {
-            for (int i = 0; i < _games.Count; i++)
-            {
-                if (_games[i].Id == gameId)
-                {
-                    await RefreshGameAsync(_games[i]);
-                    break;
-                }
-            }
-        }
-
-        private async Task RefreshAllAsync()
-        {
-            for (int i = 0; i < _games.Count; i++)
-            {
-                await RefreshGameAsync(_games[i]);
-            }
-        }
-
-        private async Task RefreshGameAsync(GameConfig game)
-        {
-            try
-            {
-                await _fetcher.EnsureIconCachedAsync(game, _storage);
-                var fetched = await _fetcher.FetchAsync(game);
-
-                GameCacheEntry entry;
-                if (!_state.Cache.TryGetValue(game.Id, out entry))
-                {
-                    entry = new GameCacheEntry();
-                    _state.Cache[game.Id] = entry;
-                }
-
-                if (fetched != null && fetched.Count > 0)
-                {
-                    entry.Notes = fetched;
-                }
-                entry.LastFetchedAt = DateTime.Now.ToString("HH:mm");
-                _storage.SaveState(_state);
-
-                RenderDock(false);
-                if (_popover.IsVisible && _popover.ActiveGameId == game.Id)
-                {
-                    _popover.RefreshView(entry);
-                }
-            }
-            catch { }
-        }
-
-        private int GetUnreadCount(string gameId)
-        {
-            GameCacheEntry entry;
-            if (!_state.Cache.TryGetValue(gameId, out entry) || entry.Notes == null) return 0;
-            var readSet = new HashSet<string>(entry.ReadIds ?? new List<string>());
-            int cnt = 0;
-            for (int i = 0; i < entry.Notes.Count; i++)
-            {
-                if (!readSet.Contains(entry.Notes[i].Idx)) cnt++;
-            }
-            return cnt;
-        }
-
-        private int GetTotalUnreadCount()
-        {
-            int total = 0;
-            for (int i = 0; i < _games.Count; i++)
-            {
-                total += GetUnreadCount(_games[i].Id);
-            }
-            return total;
-        }
-
-        private ContextMenu BuildContextMenu()
-        {
-            var m = new ContextMenu();
-            var refresh = new MenuItem { Header = "지금 새로고침" };
-            refresh.Click += async delegate { await RefreshAllAsync(); };
-            m.Items.Add(refresh);
-
-            var toggleCollapse = new MenuItem { Header = "접기 / 펼치기" };
-            toggleCollapse.Click += delegate { ToggleCollapse(); };
-            m.Items.Add(toggleCollapse);
-
-            // 4-way expand direction submenu
-            var dirMenu = new MenuItem { Header = "펼치는 방향" };
-            var dirUp = new MenuItem { Header = "위로", IsCheckable = true };
-            var dirDown = new MenuItem { Header = "아래로", IsCheckable = true };
-            var dirLeft = new MenuItem { Header = "왼쪽으로", IsCheckable = true };
-            var dirRight = new MenuItem { Header = "오른쪽으로", IsCheckable = true };
-
-            dirUp.Click += delegate { SetExpandDirection("up"); };
-            dirDown.Click += delegate { SetExpandDirection("down"); };
-            dirLeft.Click += delegate { SetExpandDirection("left"); };
-            dirRight.Click += delegate { SetExpandDirection("right"); };
-
-            dirMenu.Items.Add(dirUp);
-            dirMenu.Items.Add(dirDown);
-            dirMenu.Items.Add(dirLeft);
-            dirMenu.Items.Add(dirRight);
-            m.Items.Add(dirMenu);
-
-            m.Items.Add(new Separator());
-
-            var startup = new MenuItem { Header = "Windows 시작 시 실행", IsCheckable = true };
-            m.Opened += delegate
-            {
-                string d = NormalizeDirection(_state.ExpandDirection);
-                dirUp.IsChecked = (d == "up");
-                dirDown.IsChecked = (d == "down");
-                dirLeft.IsChecked = (d == "left");
-                dirRight.IsChecked = (d == "right");
-                startup.IsChecked = IsStartupEnabled();
-            };
-            startup.Click += delegate { SetStartup(startup.IsChecked); };
-            m.Items.Add(startup);
-
-            var openCfg = new MenuItem { Header = "games.json 열기" };
-            openCfg.Click += delegate
-            {
-                try { Process.Start("notepad.exe", System.IO.Path.Combine(_storage.BaseDir, "games.json")); }
-                catch { }
-            };
-            m.Items.Add(openCfg);
-
-            m.Items.Add(new Separator());
-            var exit = new MenuItem { Header = "종료" };
-            exit.Click += delegate { Close(); };
-            m.Items.Add(exit);
-            return m;
-        }
-
-        private static bool IsStartupEnabled()
-        {
-            try
-            {
-                using (var k = Registry.CurrentUser.OpenSubKey(RunKey, false))
-                {
-                    return k != null && k.GetValue(AppName) != null;
-                }
-            }
-            catch { return false; }
-        }
-
-        private static void SetStartup(bool enable)
-        {
-            try
-            {
-                using (var k = Registry.CurrentUser.OpenSubKey(RunKey, true))
-                {
-                    if (k == null) return;
-                    if (enable) k.SetValue(AppName, "\"" + Process.GetCurrentProcess().MainModule.FileName + "\"");
-                    else k.DeleteValue(AppName, false);
-                }
-            }
-            catch { }
-        }
-
-        private static BitmapImage LoadBitmap(string path)
-        {
-            try
-            {
-                var bmp = new BitmapImage();
-                bmp.BeginInit();
-                bmp.CacheOption = BitmapCacheOption.OnLoad;
-                bmp.UriSource = new Uri(path, UriKind.Absolute);
-                bmp.EndInit();
-                bmp.Freeze();
-                return bmp;
-            }
-            catch { return null; }
-        }
-
-        private void OnSourceInitialized(object sender, EventArgs e)
-        {
-            var h = new WindowInteropHelper(this).Handle;
-            SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h, GWL_EXSTYLE) | WS_EX_TOOLWINDOW);
-            var src = HwndSource.FromHwnd(h);
-            if (src != null) src.AddHook(Hook);
-            SetWindowPos(h, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
-        }
-
-        private IntPtr Hook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
-        {
-            if (msg == WM_WINDOWPOSCHANGING)
-            {
-                var wp = (WINDOWPOS)Marshal.PtrToStructure(lParam, typeof(WINDOWPOS));
-                wp.hwndInsertAfter = HWND_BOTTOM;
-                wp.flags &= ~SWP_NOZORDER;
-                Marshal.StructureToPtr(wp, lParam, false);
-            }
-            return IntPtr.Zero;
-        }
-
-        private const int GWL_EXSTYLE = -20;
-        private const int WS_EX_TOOLWINDOW = 0x80;
-        private const int WM_WINDOWPOSCHANGING = 0x46;
-        private const uint SWP_NOSIZE = 0x1;
-        private const uint SWP_NOMOVE = 0x2;
-        private const uint SWP_NOZORDER = 0x4;
-        private const uint SWP_NOACTIVATE = 0x10;
-        private static readonly IntPtr HWND_BOTTOM = new IntPtr(1);
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct WINDOWPOS { public IntPtr hwnd, hwndInsertAfter; public int x, y, cx, cy; public uint flags; }
-
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr FindWindow(string cls, string title);
-        [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr h, int idx);
-        [DllImport("user32.dll")] private static extern int SetWindowLong(IntPtr h, int idx, int v);
-        [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     }
 }

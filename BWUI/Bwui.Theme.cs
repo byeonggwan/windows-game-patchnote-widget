@@ -55,7 +55,8 @@ namespace Bwui
     public static class Glyphs
     {
         public const string Warning = "", Error = "", Refresh = "", Check = "",
-            More = "", Settings = "", HardDrive = "", Info = "", Mail = "";
+            More = "", Settings = "", HardDrive = "", Info = "", Mail = "",
+            ChevronUp = "", ChevronDown = "", ChevronLeft = "", ChevronRight = "", Close = "";
     }
 
     public sealed class Palette

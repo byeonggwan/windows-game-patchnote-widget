@@ -45,12 +45,7 @@ namespace Bwui
             size = ParseSize(Settings.Get("size"));
             if (Array.IndexOf(SupportedSizes, size) < 0) size = SupportedSizes[0];
 
-            Card = new Border
-            {
-                CornerRadius = new CornerRadius(Tokens.CardRadius),
-                Padding = new Thickness(Tokens.CardPadding),
-                Margin = new Thickness(Tokens.ShadowRoom)
-            };
+            Card = new Border();
             Content = Card;
             StyleCard();
 
@@ -116,17 +111,7 @@ namespace Bwui
 
         // ---------- card & theme ----------
 
-        void StyleCard()
-        {
-            var p = Theme.Current;
-            Card.Background = Ui.Br(p.Surface);
-            Card.BorderBrush = Ui.Br(p.Border);
-            Card.BorderThickness = new Thickness(p.IsHighContrast ? 1 : 0);
-            Card.Effect = p.ShadowOpacity <= 0 ? null : new DropShadowEffect
-            {
-                BlurRadius = 24, ShadowDepth = 4, Direction = 270, Opacity = p.ShadowOpacity, Color = p.Shadow
-            };
-        }
+        void StyleCard() { Ui.StyleCard(Card); }
 
         // ---------- menu ----------
 

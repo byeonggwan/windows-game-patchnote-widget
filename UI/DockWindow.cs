@@ -317,13 +317,13 @@ namespace PatchNoteMailbox.UI
 
             if (unread > 0)
             {
-                var badge = UiX.CountBadge(unread, Accent);
+                var badge = Ui.CountBadge(unread, Accent);
                 badge.Margin = new Thickness(0, -Tokens.Space1, -Tokens.Space1, 0);
                 slot.Children.Add(badge);
             }
             else if (status.Error != null && !hasNotes)
             {
-                var mark = UiX.StatusMark(Status.Caution);
+                var mark = Ui.StatusMark(Status.Caution);
                 mark.Margin = new Thickness(0, 0, -Tokens.Space1, -Tokens.Space1);
                 slot.Children.Add(mark);
             }
@@ -356,21 +356,21 @@ namespace PatchNoteMailbox.UI
                 string tip = Text.T("패치노트 우편함", "Patch note mailbox")
                     + (total > 0 ? Text.T(" · 안 읽은 소식 " + total + "개", " · " + total + " unread") : "")
                     + Text.T(" (클릭해서 펼치기)", " (click to expand)");
-                var btn = Ui.IconButton(UiX.AccentIcon(Accent, Glyphs.Mail), tip, ToggleCollapse);
+                var btn = Ui.IconButton(Ui.Icon(null, Accent, Glyphs.Mail), tip, ToggleCollapse);
                 btn.Width = Tile;
                 btn.Height = Tile;
                 btn.CornerRadius = new CornerRadius(Tokens.InnerRadius);
                 cell.Children.Add(btn);
                 if (total > 0)
                 {
-                    var badge = UiX.CountBadge(total, Accent);
+                    var badge = Ui.CountBadge(total, Accent);
                     badge.Margin = new Thickness(0, -Tokens.Space1, -Tokens.Space1, 0);
                     cell.Children.Add(badge);
                 }
             }
             else
             {
-                string chevron = Dir == "down" ? UiX.ChevronUp : Dir == "left" ? UiX.ChevronRight : Dir == "right" ? UiX.ChevronLeft : UiX.ChevronDown;
+                string chevron = Dir == "down" ? Glyphs.ChevronUp : Dir == "left" ? Glyphs.ChevronRight : Dir == "right" ? Glyphs.ChevronLeft : Glyphs.ChevronDown;
                 var btn = Ui.IconButton(chevron, Text.T("우편함 접기", "Collapse"), ToggleCollapse);
                 btn.HorizontalAlignment = HorizontalAlignment.Center;
                 btn.VerticalAlignment = VerticalAlignment.Center;

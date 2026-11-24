@@ -70,13 +70,13 @@ namespace PatchNoteMailbox.UI
             UseLayoutRounding = true;
 
             _card = new Border();
-            UiX.StyleCard(_card);
+            Ui.StyleCard(_card);
             Content = _card;
 
             // Follow Light / Dark / High Contrast like the dock does.
             EventHandler onTheme = delegate
             {
-                UiX.StyleCard(_card);
+                Ui.StyleCard(_card);
                 if (IsVisible) Render();
             };
             Theme.Changed += onTheme;
@@ -195,7 +195,7 @@ namespace PatchNoteMailbox.UI
             var refresh = Ui.IconButton(Glyphs.Refresh, Text.T("새로고침", "Refresh"), delegate { _onRefreshGame(_game.Id); });
             refresh.Margin = new Thickness(0, 0, Tokens.Space2, 0);
             trailing.Children.Add(refresh);
-            trailing.Children.Add(Ui.IconButton(UiX.Close, Text.T("닫기", "Close"), delegate { Hide(); }));
+            trailing.Children.Add(Ui.IconButton(Glyphs.Close, Text.T("닫기", "Close"), delegate { Hide(); }));
 
             root.Children.Add(Ui.Header(GameIcon(accent), _game.Name, trailing));
             root.Children.Add(Ui.Divider());
@@ -241,7 +241,7 @@ namespace PatchNoteMailbox.UI
             // 4. Footer: total and pager.
             var footer = new DockPanel { LastChildFill = true };
             var pager = new StackPanel { Orientation = Orientation.Horizontal };
-            pager.Children.Add(UiX.TextButton(Text.T("이전", "Prev"), _page > 1, delegate
+            pager.Children.Add(Ui.TextButton(Text.T("이전", "Prev"), _page > 1, delegate
             {
                 if (_page > 1) { _page--; Render(); }
             }));
@@ -249,7 +249,7 @@ namespace PatchNoteMailbox.UI
             pageText.VerticalAlignment = VerticalAlignment.Center;
             pageText.Margin = new Thickness(Tokens.Space3, 0, Tokens.Space3, 0);
             pager.Children.Add(pageText);
-            pager.Children.Add(UiX.TextButton(Text.T("다음", "Next"), _page < totalPages, delegate
+            pager.Children.Add(Ui.TextButton(Text.T("다음", "Next"), _page < totalPages, delegate
             {
                 if (_page < totalPages) { _page++; Render(); }
             }));
@@ -292,7 +292,7 @@ namespace PatchNoteMailbox.UI
 
             string name = (isRead ? "" : Text.T("안 읽음, ", "Unread, ")) + item.Title + ", " + item.Date;
             var captured = item;
-            var row = UiX.ListRow(g, RowHeight, name, delegate
+            var row = Ui.ListRow(g, RowHeight, name, delegate
             {
                 OpenInBrowser(captured.Url);
                 _onMarkRead(_game.Id, captured.Idx);
@@ -322,7 +322,7 @@ namespace PatchNoteMailbox.UI
         private FrameworkElement GameIcon(Color accent)
         {
             var logo = _getIcon(_game.Id);
-            var icon = logo != null ? Ui.Icon(logo, accent) : UiX.AccentIcon(accent, Glyphs.Mail);
+            var icon = logo != null ? Ui.Icon(logo, accent) : Ui.Icon(null, accent, Glyphs.Mail);
             if (logo != null)
                 icon.Clip = new RectangleGeometry(new Rect(0, 0, Tokens.IconSize, Tokens.IconSize), 6, 6);
             return icon;

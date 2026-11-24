@@ -8,6 +8,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 
@@ -118,7 +119,8 @@ namespace Bwui
                 VerticalAlignment = VerticalAlignment.Center
             };
             if (fallbackGlyph != null)
-                b.Child = Glyph(fallbackGlyph, 12, P.IsHighContrast ? SystemColors.HighlightTextColor : Colors.White);
+                b.Child = Glyph(fallbackGlyph, 12, P.IsHighContrast ? SystemColors.HighlightTextColor
+                    : Palette.Contrast(Colors.White, accent) >= 3 ? Colors.White : P.Surface);
             return b;
         }
 
@@ -231,6 +233,95 @@ namespace Bwui
             Hover(b);
             Click(b, onClick);
             return b;
+        }
+
+        /// <summary>The card look (Surface, radius, padding, shadow room, the one shadow, HC border). Re-apply on Theme.Changed.</summary>
+        public static void StyleCard(Border card)
+        {
+            var p = P;
+            card.CornerRadius = new CornerRadius(Tokens.CardRadius);
+            card.Padding = new Thickness(Tokens.CardPadding);
+            card.Margin = new Thickness(Tokens.ShadowRoom);
+            card.Background = Br(p.Surface);
+            card.BorderBrush = Br(p.Border);
+            card.BorderThickness = new Thickness(p.IsHighContrast ? 1 : 0);
+            card.Effect = p.ShadowOpacity <= 0 ? null : new DropShadowEffect
+            {
+                BlurRadius = 24, ShadowDepth = 4, Direction = 270, Opacity = p.ShadowOpacity, Color = p.Shadow
+            };
+        }
+
+        /// <summary>TextButton with a disabled state: 45% opacity and not clickable.</summary>
+        public static Border TextButton(string text, bool enabled, Action onClick)
+        {
+            var b = TextButton(text, onClick);
+            if (!enabled) { b.IsEnabled = false; b.Opacity = 0.45; b.Cursor = null; }
+            return b;
+        }
+
+        /// <summary>Clickable list row: transparent, SurfaceSubtle on hover, InnerRadius corners.</summary>
+        public static Border ListRow(UIElement content, double height, string accessibleName, Action onClick)
+        {
+            var row = new Border
+            {
+                Height = height,
+                Padding = new Thickness(Tokens.Space2, 0, Tokens.Space2, 0),
+                CornerRadius = new CornerRadius(Tokens.InnerRadius),
+                Background = Brushes.Transparent,
+                Cursor = Cursors.Hand,
+                Child = content
+            };
+            AutomationProperties.SetName(row, accessibleName);
+            row.MouseEnter += (s, e) => row.Background = Br(P.SurfaceSubtle);
+            row.MouseLeave += (s, e) => row.Background = Brushes.Transparent;
+            row.MouseLeftButtonDown += (s, e) => { e.Handled = true; };
+            row.MouseLeftButtonUp += (s, e) => { e.Handled = true; if (onClick != null) onClick(); };
+            return row;
+        }
+
+        /// <summary>Count badge (20px pill) for a tile's top-right corner. The number is the cue, not the color (C3).</summary>
+        public static Border CountBadge(int count, Color accent)
+        {
+            var p = P;
+            var fg = p.IsHighContrast ? SystemColors.HighlightTextColor : p.Surface;
+            var t = Text(count > 99 ? "99+" : count.ToString(), TextStyle.Caption, fg);
+            t.FontWeight = FontWeights.SemiBold;
+            t.TextTrimming = TextTrimming.None;
+            t.HorizontalAlignment = HorizontalAlignment.Center;
+            t.VerticalAlignment = VerticalAlignment.Center;
+            return new Border
+            {
+                MinWidth = 20, Height = 20,
+                Padding = new Thickness(Tokens.Space1, 0, Tokens.Space1, 0),
+                CornerRadius = new CornerRadius(10),
+                Background = Br(accent),
+                BorderBrush = Br(p.Surface),
+                BorderThickness = new Thickness(2),
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Top,
+                IsHitTestVisible = false,
+                Child = t
+            };
+        }
+
+        /// <summary>Status mark for a tile's bottom-right corner: a Surface disc with the status glyph (C3).</summary>
+        public static Border StatusMark(Status status)
+        {
+            var p = P;
+            var c = p.StatusColor(status, p.TextSecondary);
+            double d = Tokens.Space5;
+            return new Border
+            {
+                Width = d, Height = d,
+                CornerRadius = new CornerRadius(d / 2),
+                Background = Br(p.Surface),
+                BorderBrush = Br(p.Border),
+                BorderThickness = new Thickness(p.IsHighContrast ? 1 : 0),
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Bottom,
+                IsHitTestVisible = false,
+                Child = Glyph(status == Status.Critical ? Glyphs.Error : Glyphs.Warning, Tokens.StatusGlyphSize, c)
+            };
         }
 
         // ---------- data ----------

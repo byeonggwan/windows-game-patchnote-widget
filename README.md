@@ -18,7 +18,7 @@ Built on [BWUI](https://github.com/byeonggwan/bwui), a small design system for a
 - Sits on the desktop behind your windows, hidden from the taskbar and Alt+Tab. Drag it anywhere; position, collapsed state and direction are remembered.
 - Right-click: collapse/expand, expand direction (click to cycle Up → Right → Down → Left), open `games.json`, then refresh now, theme, start with Windows, exit.
 - UI text follows the Windows display language (Korean or English).
-- Updates itself from this repo's GitHub Releases. Once a day it checks for a new version and shows a download button; one click installs it after checking the SHA-256. Turn on **Update automatically** in the right-click menu to skip the click.
+- Updates itself from this repo's GitHub Releases, only through the right-click menu (never on the widget itself). **Check for updates** compares your version with the latest release; if it's newer, click **Install update**, which checks the SHA-256, swaps the exe and restarts. Check **Update automatically** to have it check daily and install without asking.
 - **No API keys, no installer, no runtime to download** — built with the C# compiler (`csc.exe`) that ships with Windows 10/11, using software-only WPF rendering to keep memory and CPU usage minimal.
 
 ## Requirements

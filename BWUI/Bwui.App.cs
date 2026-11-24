@@ -193,12 +193,12 @@ namespace Bwui
 
         public static string CheckForUpdates { get { return T("업데이트 확인", "Check for updates"); } }
         public static string AutoUpdate { get { return T("자동 업데이트", "Update automatically"); } }
-        public static string Update { get { return T("업데이트", "Update"); } }
+        public static string CurrentVersion { get { return T("현재", "current"); } }
+        public static string Checking { get { return T("업데이트 확인 중…", "Checking for updates…"); } }
         public static string Updating { get { return T("업데이트 중…", "Updating…"); } }
         public static string UpToDate { get { return T("최신 버전이에요", "You're up to date"); } }
         public static string UpdateFailed { get { return T("업데이트하지 못했어요", "Couldn't update"); } }
         public static string InstallUpdate(string tag) { return T("업데이트 설치 (" + tag + ")", "Install update (" + tag + ")"); }
-        public static string UpdateAvailable(string tag) { return T("새 버전 " + tag, tag + " is available"); }
 
         public static string ThemeItem(ThemeMode m)
         {

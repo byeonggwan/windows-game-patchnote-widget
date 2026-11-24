@@ -59,7 +59,16 @@ namespace Bwui
         public bool Auto
         {
             get { return settings.GetBool("update_auto", false); }
-            set { settings.SetBool("update_auto", value); if (value && State == UpdateState.Available) Install(); }
+            set
+            {
+                settings.SetBool("update_auto", value);
+                // Turning it on checks right away; turning it off stops background checks.
+                if (value && IsInstalledCopy)
+                {
+                    if (State == UpdateState.Available) Install();
+                    else Check(false);
+                }
+            }
         }
 
         /// <summary>Only the installed copy (in %LOCALAPPDATA%\&lt;AppId&gt;) updates itself; a build in bin\ never does.</summary>
@@ -78,13 +87,17 @@ namespace Bwui
 
         static string EntryExe { get { return System.Reflection.Assembly.GetEntryAssembly().Location; } }
 
-        /// <summary>First check a minute after start, then whenever a day has passed since the last one.</summary>
+        /// <summary>
+        /// Background checks run only with "Update automatically" on: a minute after start, then once a day.
+        /// With it off, nothing is checked until the user picks "Check for updates".
+        /// </summary>
         public void Start()
         {
             timer = new DispatcherTimer(DispatcherPriority.Background, ui) { Interval = TimeSpan.FromMinutes(1) };
             timer.Tick += (s, e) =>
             {
                 timer.Interval = TimeSpan.FromHours(1);
+                if (!Auto) return;
                 var last = settings.GetDouble("update_checked");
                 if (!last.HasValue || DateTime.UtcNow - FromEpoch(last.Value) >= CheckEvery) Check(false);
             };

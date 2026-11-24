@@ -7,11 +7,11 @@ A small, rounded desktop widget for Windows that acts as a **patch note mailbox*
 | ![Expanded dock](docs/expanded.png) | ![Collapsed mailbox](docs/collapsed.png) | ![Patch note popover](docs/popover.png) |
 
 - Shows each game's **official icon** with an **unread count badge** on the top-right (`0` hides the badge).
-- One click smoothly **collapses downward / expands upward** with the bottom toggle button anchored in place; when collapsed, shows a single mailbox icon with the **total unread count** across all games.
+- One click smoothly **collapses / expands** in your chosen direction (**Up / Down / Left / Right**, configurable once via right-click) with the toggle button anchored in place; when collapsed, shows a single mailbox icon with the **total unread count** across all games.
 - Clicking a game icon opens a clean **5-item paginated list** (`IDX`, title, date — latest first). Clicking any row opens the patch note in your default browser and marks it as read.
 - Checks automatically on launch and **every 1 hour** in the background (with manual refresh via right-click or the `↻` button).
 - Sits on the desktop behind your windows, hidden from the taskbar and Alt+Tab. Drag it anywhere; position and collapsed state are remembered.
-- Right-click: refresh now, collapse/expand, switch vertical/horizontal layout, start with Windows, open `games.json`, quit.
+- Right-click: refresh now, collapse/expand, set expand direction (Up / Down / Left / Right), start with Windows, open `games.json`, quit.
 - **No API keys, no installer, no runtime to download** — built with the C# compiler (`csc.exe`) that ships with Windows 10/11, using software-only WPF rendering to keep memory and CPU usage minimal.
 
 > The widget's UI labels are in Korean (`제목` = title, `등록일` = date, `모두 읽음` = mark all read).

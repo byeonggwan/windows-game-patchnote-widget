@@ -93,7 +93,7 @@ namespace PatchNoteMailbox.UI
             };
         }
 
-        public void ShowForGame(GameConfig game, GameCacheEntry cache, Window dockWindow)
+        public void ShowForGame(GameConfig game, GameCacheEntry cache, Window dockWindow, string expandDirection)
         {
             bool changedGame = (_game == null || _game.Id != game.Id);
             _game = game;
@@ -103,7 +103,7 @@ namespace PatchNoteMailbox.UI
             Render();
             if (!IsVisible) Show();
             UpdateLayout();
-            PositionNearDock(dockWindow);
+            PositionNearDock(dockWindow, expandDirection);
             Activate();
         }
 
@@ -125,15 +125,36 @@ namespace PatchNoteMailbox.UI
             return _card;
         }
 
-        private void PositionNearDock(Window dock)
+        private void PositionNearDock(Window dock, string expandDirection)
         {
             Rect work = SystemParameters.WorkArea;
-            double x = dock.Left - Width + 22;
-            if (x < work.Left)
+            string dir = (expandDirection ?? "up").ToLowerInvariant();
+            double x, y;
+
+            if (dir == "left" || dir == "right")
             {
-                x = dock.Left + dock.ActualWidth - 22;
+                // Horizontal dock: open above if room, otherwise below
+                x = (dir == "left")
+                    ? dock.Left + dock.ActualWidth - Width
+                    : dock.Left;
+                y = dock.Top - ActualHeight + 22;
+                if (y < work.Top)
+                {
+                    y = dock.Top + dock.ActualHeight - 22;
+                }
             }
-            double y = dock.Top + dock.ActualHeight - ActualHeight;
+            else
+            {
+                // Vertical dock: open to the left if room, otherwise right
+                x = dock.Left - Width + 22;
+                if (x < work.Left)
+                {
+                    x = dock.Left + dock.ActualWidth - 22;
+                }
+                y = (dir == "down")
+                    ? dock.Top
+                    : dock.Top + dock.ActualHeight - ActualHeight;
+            }
 
             if (x < work.Left) x = work.Left;
             if (x + Width > work.Right) x = work.Right - Width;

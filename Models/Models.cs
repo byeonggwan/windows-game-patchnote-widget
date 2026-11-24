@@ -92,7 +92,7 @@ namespace PatchNoteMailbox.Models
     {
         public double DockLeft { get; set; }
         public double DockTop { get; set; }
-        public bool IsVertical { get; set; }
+        public string ExpandDirection { get; set; }
         public bool IsCollapsed { get; set; }
         public Dictionary<string, GameCacheEntry> Cache { get; set; }
 
@@ -100,7 +100,7 @@ namespace PatchNoteMailbox.Models
         {
             DockLeft = -1;
             DockTop = -1;
-            IsVertical = true;
+            ExpandDirection = "up";
             IsCollapsed = false;
             Cache = new Dictionary<string, GameCacheEntry>();
         }

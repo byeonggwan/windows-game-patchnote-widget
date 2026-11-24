@@ -62,6 +62,7 @@ namespace PatchNoteMailbox.UI
             _fetcher = fetcher;
             _games = _storage.LoadGames();
             _state = _storage.LoadState();
+            _state.ExpandDirection = NormalizeDirection(_state.ExpandDirection);
 
             Title = "게임 패치노트 우편함";
             WindowStyle = WindowStyle.None;
@@ -100,10 +101,6 @@ namespace PatchNoteMailbox.UI
             _divider = new Border { Background = B(CSep) };
             _toggleSlot = new Grid { Width = ToggleSize, Height = ToggleSize, Cursor = Cursors.Hand };
 
-            _rootPanel.Children.Add(_gamesClip);
-            _rootPanel.Children.Add(_divider);
-            _rootPanel.Children.Add(_toggleSlot);
-
             _card.Child = _rootPanel;
             _canvasGrid.Children.Add(_card);
             Content = _canvasGrid;
@@ -131,6 +128,25 @@ namespace PatchNoteMailbox.UI
             Closing += OnClosing;
         }
 
+        private static string NormalizeDirection(string dir)
+        {
+            string d = (dir ?? "up").Trim().ToLowerInvariant();
+            if (d == "down" || d == "left" || d == "right") return d;
+            return "up";
+        }
+
+        private bool IsVerticalDir()
+        {
+            string d = NormalizeDirection(_state.ExpandDirection);
+            return d == "up" || d == "down";
+        }
+
+        private bool IsToggleFirst()
+        {
+            string d = NormalizeDirection(_state.ExpandDirection);
+            return d == "down" || d == "right";
+        }
+
         public static void RenderSnapshot(StorageService storage, PatchNoteFetcher fetcher, string outPath, string mode)
         {
             var games = storage.LoadGames();
@@ -140,6 +156,7 @@ namespace PatchNoteMailbox.UI
             }
 
             var w = new DockWindow(storage, fetcher);
+            w._state.ExpandDirection = "up";
             // Always use clean showcase unread state in snapshot previews (does not save to disk)
             w._state.Cache["lostark"] = new GameCacheEntry
             {
@@ -176,6 +193,7 @@ namespace PatchNoteMailbox.UI
             else
             {
                 w._state.IsCollapsed = (mode == "collapsed");
+                w.ApplyFixedWindowDimensions();
                 w.RenderDock(true);
                 w._canvasGrid.Children.Remove(w._card);
                 w._card.HorizontalAlignment = HorizontalAlignment.Center;
@@ -211,24 +229,75 @@ namespace PatchNoteMailbox.UI
 
         private void ApplyFixedWindowDimensions()
         {
+            string dir = NormalizeDirection(_state.ExpandDirection);
             double drawerExtent = GetExpandedDrawerExtent();
             double shortSide = SlotSize + CardPadding * 2 + CardMargin * 2;
             double longSide = drawerExtent + ToggleSize + CardPadding * 2 + CardMargin * 2;
 
-            if (_state.IsVertical)
+            if (dir == "up" || dir == "down")
             {
                 Width = shortSide;
                 Height = longSide;
                 _card.HorizontalAlignment = HorizontalAlignment.Center;
-                _card.VerticalAlignment = VerticalAlignment.Bottom;
+                _card.VerticalAlignment = (dir == "up") ? VerticalAlignment.Bottom : VerticalAlignment.Top;
             }
             else
             {
                 Width = longSide;
                 Height = shortSide;
-                _card.HorizontalAlignment = HorizontalAlignment.Right;
+                _card.HorizontalAlignment = (dir == "left") ? HorizontalAlignment.Right : HorizontalAlignment.Left;
                 _card.VerticalAlignment = VerticalAlignment.Center;
             }
+        }
+
+        // Compute the toggle button's center relative to the Window's Top-Left
+        private Point GetToggleCenterOffset(string dir)
+        {
+            double drawerExtent = GetExpandedDrawerExtent();
+            double shortSide = SlotSize + CardPadding * 2 + CardMargin * 2;
+            double edgeToCenter = CardMargin + CardPadding + ToggleSize / 2.0;
+
+            if (dir == "up")
+                return new Point(shortSide / 2.0, drawerExtent + edgeToCenter);
+            if (dir == "down")
+                return new Point(shortSide / 2.0, edgeToCenter);
+            if (dir == "left")
+                return new Point(drawerExtent + edgeToCenter, shortSide / 2.0);
+            // right
+            return new Point(edgeToCenter, shortSide / 2.0);
+        }
+
+        private void SetExpandDirection(string newDir)
+        {
+            string oldDir = NormalizeDirection(_state.ExpandDirection);
+            string targetDir = NormalizeDirection(newDir);
+            if (oldDir == targetDir) return;
+
+            if (_popover.IsVisible) _popover.Hide();
+
+            // Keep the toggle button stationary on screen while switching direction
+            Point oldOffset = GetToggleCenterOffset(oldDir);
+            double anchorScreenX = Left + oldOffset.X;
+            double anchorScreenY = Top + oldOffset.Y;
+
+            _state.ExpandDirection = targetDir;
+            ApplyFixedWindowDimensions();
+            RenderDock(true);
+
+            Point newOffset = GetToggleCenterOffset(targetDir);
+            double nextLeft = anchorScreenX - newOffset.X;
+            double nextTop = anchorScreenY - newOffset.Y;
+
+            var vs = new Rect(SystemParameters.VirtualScreenLeft, SystemParameters.VirtualScreenTop,
+                              SystemParameters.VirtualScreenWidth, SystemParameters.VirtualScreenHeight);
+            if (nextLeft < vs.Left) nextLeft = vs.Left;
+            if (nextLeft + Width > vs.Right) nextLeft = vs.Right - Width;
+            if (nextTop < vs.Top) nextTop = vs.Top;
+            if (nextTop + Height > vs.Bottom) nextTop = vs.Bottom - Height;
+
+            Left = nextLeft;
+            Top = nextTop;
+            SavePosition();
         }
 
         private async void OnLoaded(object sender, RoutedEventArgs e)
@@ -279,23 +348,68 @@ namespace PatchNoteMailbox.UI
 
         private void RenderDock(bool applyCollapsedImmediately)
         {
-            bool isVert = _state.IsVertical;
+            bool isVert = IsVerticalDir();
+            bool toggleFirst = IsToggleFirst();
+
             _rootPanel.Orientation = isVert ? Orientation.Vertical : Orientation.Horizontal;
             _gamesPanel.Orientation = isVert ? Orientation.Vertical : Orientation.Horizontal;
 
+            // Arrange root children based on expand direction
+            _rootPanel.Children.Clear();
+            if (toggleFirst)
+            {
+                _rootPanel.Children.Add(_toggleSlot);
+                _rootPanel.Children.Add(_gamesClip);
+            }
+            else
+            {
+                _rootPanel.Children.Add(_gamesClip);
+                _rootPanel.Children.Add(_toggleSlot);
+            }
+
+            // Configure divider
+            _divider.Width = isVert ? 26 : 1;
+            _divider.Height = isVert ? 1 : 26;
+            _divider.HorizontalAlignment = HorizontalAlignment.Center;
+            _divider.VerticalAlignment = VerticalAlignment.Center;
+            if (toggleFirst)
+            {
+                _divider.Margin = isVert ? new Thickness(0, 8, 0, 0) : new Thickness(8, 0, 0, 0);
+            }
+            else
+            {
+                _divider.Margin = isVert ? new Thickness(0, 0, 0, 8) : new Thickness(0, 0, 8, 0);
+            }
+            if (_divider.Parent != null)
+            {
+                var parent = _divider.Parent as Panel;
+                if (parent != null) parent.Children.Remove(_divider);
+            }
+
             // Populate game icons
             _gamesPanel.Children.Clear();
+            if (toggleFirst)
+            {
+                _gamesPanel.Children.Add(_divider);
+            }
+
             for (int i = 0; i < _games.Count; i++)
             {
                 var game = _games[i];
                 int unread = GetUnreadCount(game.Id);
                 bool isActive = _popover.IsVisible && _popover.ActiveGameId == game.Id;
 
+                Thickness slotMargin;
+                if (toggleFirst)
+                    slotMargin = isVert ? new Thickness(0, SlotSpacing, 0, 0) : new Thickness(SlotSpacing, 0, 0, 0);
+                else
+                    slotMargin = isVert ? new Thickness(0, 0, 0, SlotSpacing) : new Thickness(0, 0, SlotSpacing, 0);
+
                 var slot = new Grid
                 {
                     Width = SlotSize,
                     Height = SlotSize,
-                    Margin = isVert ? new Thickness(0, 0, 0, SlotSpacing) : new Thickness(0, 0, SlotSpacing, 0),
+                    Margin = slotMargin,
                     Cursor = Cursors.Hand,
                     ToolTip = unread > 0
                         ? string.Format("{0} (안 읽음 {1}개)", game.Name, unread)
@@ -363,18 +477,10 @@ namespace PatchNoteMailbox.UI
                 _gamesPanel.Children.Add(slot);
             }
 
-            // Include divider inside _gamesPanel so it collapses smoothly with the icons
-            _divider.Width = isVert ? 26 : 1;
-            _divider.Height = isVert ? 1 : 26;
-            _divider.Margin = isVert ? new Thickness(0, 0, 0, 8) : new Thickness(0, 0, 8, 0);
-            _divider.HorizontalAlignment = HorizontalAlignment.Center;
-            _divider.VerticalAlignment = VerticalAlignment.Center;
-            if (_divider.Parent != null)
+            if (!toggleFirst)
             {
-                var parent = _divider.Parent as Panel;
-                if (parent != null) parent.Children.Remove(_divider);
+                _gamesPanel.Children.Add(_divider);
             }
-            _gamesPanel.Children.Add(_divider);
 
             if (applyCollapsedImmediately)
             {
@@ -397,6 +503,15 @@ namespace PatchNoteMailbox.UI
             }
 
             RenderToggleButton();
+        }
+
+        private string GetCollapseArrow()
+        {
+            string dir = NormalizeDirection(_state.ExpandDirection);
+            if (dir == "down") return "▲";
+            if (dir == "left") return "▶";
+            if (dir == "right") return "◀";
+            return "▼";
         }
 
         private void RenderToggleButton()
@@ -433,7 +548,7 @@ namespace PatchNoteMailbox.UI
                 btnBg.CornerRadius = new CornerRadius(16);
                 btnBg.Child = new TextBlock
                 {
-                    Text = _state.IsVertical ? "▼" : "▶",
+                    Text = GetCollapseArrow(),
                     FontSize = 10,
                     Foreground = B(CLabel),
                     HorizontalAlignment = HorizontalAlignment.Center,
@@ -473,7 +588,7 @@ namespace PatchNoteMailbox.UI
             }
 
             bool collapsing = _state.IsCollapsed;
-            bool isVert = _state.IsVertical;
+            bool isVert = IsVerticalDir();
             double fullExtent = GetExpandedDrawerExtent();
             DependencyProperty sizeProp = isVert ? HeightProperty : WidthProperty;
 
@@ -569,7 +684,7 @@ namespace PatchNoteMailbox.UI
                 _state.Cache[game.Id] = entry;
             }
 
-            _popover.ShowForGame(game, entry, this);
+            _popover.ShowForGame(game, entry, this, _state.ExpandDirection);
             RenderDock(false);
         }
 
@@ -689,20 +804,36 @@ namespace PatchNoteMailbox.UI
             toggleCollapse.Click += delegate { ToggleCollapse(); };
             m.Items.Add(toggleCollapse);
 
-            var toggleLayout = new MenuItem { Header = "세로 / 가로 전환" };
-            toggleLayout.Click += delegate
-            {
-                _state.IsVertical = !_state.IsVertical;
-                ApplyFixedWindowDimensions();
-                _storage.SaveState(_state);
-                RenderDock(true);
-            };
-            m.Items.Add(toggleLayout);
+            // 4-way expand direction submenu
+            var dirMenu = new MenuItem { Header = "펼치는 방향" };
+            var dirUp = new MenuItem { Header = "위로", IsCheckable = true };
+            var dirDown = new MenuItem { Header = "아래로", IsCheckable = true };
+            var dirLeft = new MenuItem { Header = "왼쪽으로", IsCheckable = true };
+            var dirRight = new MenuItem { Header = "오른쪽으로", IsCheckable = true };
+
+            dirUp.Click += delegate { SetExpandDirection("up"); };
+            dirDown.Click += delegate { SetExpandDirection("down"); };
+            dirLeft.Click += delegate { SetExpandDirection("left"); };
+            dirRight.Click += delegate { SetExpandDirection("right"); };
+
+            dirMenu.Items.Add(dirUp);
+            dirMenu.Items.Add(dirDown);
+            dirMenu.Items.Add(dirLeft);
+            dirMenu.Items.Add(dirRight);
+            m.Items.Add(dirMenu);
 
             m.Items.Add(new Separator());
 
             var startup = new MenuItem { Header = "Windows 시작 시 실행", IsCheckable = true };
-            m.Opened += delegate { startup.IsChecked = IsStartupEnabled(); };
+            m.Opened += delegate
+            {
+                string d = NormalizeDirection(_state.ExpandDirection);
+                dirUp.IsChecked = (d == "up");
+                dirDown.IsChecked = (d == "down");
+                dirLeft.IsChecked = (d == "left");
+                dirRight.IsChecked = (d == "right");
+                startup.IsChecked = IsStartupEnabled();
+            };
             startup.Click += delegate { SetStartup(startup.IsChecked); };
             m.Items.Add(startup);
 

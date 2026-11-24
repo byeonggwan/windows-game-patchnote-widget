@@ -9,6 +9,7 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 
 namespace Bwui
 {
@@ -87,12 +88,104 @@ namespace Bwui
         public WidgetSize CurrentSize { get { return size; } }
         public double ContentWidth { get { return Tokens.ContentWidth(size); } }
 
+        /// <summary>Override to update from GitHub Releases (DESIGN.md §6.10). Null: no updates.</summary>
+        protected virtual UpdateSource Updates { get { return null; } }
+
+        Updater updater;
+        DispatcherTimer upToDateTimer;
+
         public void Render()
         {
             var c = Build();
             var fe = c as FrameworkElement;
             if (fe != null && double.IsNaN(fe.Width)) fe.Width = ContentWidth;
-            Card.Child = c;
+            var bar = UpdateBar(fe != null && !double.IsNaN(fe.Width) ? fe.Width : ContentWidth);
+            if (bar == null) { Card.Child = c; return; }
+            var sp = new StackPanel();
+            sp.Children.Add(c);
+            sp.Children.Add(Ui.Divider());
+            sp.Children.Add(bar);
+            Card.Child = sp;
+        }
+
+        // ---------- updates (DESIGN.md §6.10) ----------
+
+        void StartUpdater()
+        {
+            var src = Updates;
+            if (src == null) return;
+            updater = new Updater(AppId, src, Settings, Dispatcher);
+            updater.Changed += (s, e) =>
+            {
+                Render();
+                if (updater.State == UpdateState.UpToDate)
+                {
+                    // "You're up to date" shows for a few seconds after a manual check.
+                    if (upToDateTimer != null) upToDateTimer.Stop();
+                    upToDateTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(6) };
+                    upToDateTimer.Tick += (s2, e2) => { upToDateTimer.Stop(); if (updater.State == UpdateState.UpToDate) Render(); };
+                    upToDateTimer.Start();
+                }
+            };
+            if (updater.IsInstalledCopy) updater.Start();
+            Closed += (s, e) => updater.Stop();
+        }
+
+        /// <summary>The update bar under the content, or null when there is nothing to say.</summary>
+        FrameworkElement UpdateBar(double width)
+        {
+            UpdateState state;
+            string tag, error = null;
+            if (App.IsSnapshot)
+            {
+                if (Array.IndexOf(App.SnapshotArgs ?? new string[0], "update") < 0) return null;
+                state = UpdateState.Available; tag = "v9.9.9";
+            }
+            else
+            {
+                if (updater == null) return null;
+                state = updater.State; tag = updater.LatestTag; error = updater.Error;
+                if (state == UpdateState.UpToDate && (upToDateTimer == null || !upToDateTimer.IsEnabled)) return null;
+                if (state == UpdateState.Idle || state == UpdateState.Checking) return null;
+            }
+            Action install = () => { if (updater != null) updater.Install(); };
+
+            if (width < 160)
+            {
+                // Narrow widgets get a single round button.
+                if (state != UpdateState.Available && state != UpdateState.Installing) return null;
+                var b = Ui.IconButton(Glyphs.Download, state == UpdateState.Installing ? Text.Updating : Text.InstallUpdate(tag), install);
+                b.HorizontalAlignment = HorizontalAlignment.Center;
+                if (state == UpdateState.Installing) { b.IsEnabled = false; b.Opacity = 0.45; }
+                return b;
+            }
+
+            string msg;
+            Border action = null;
+            switch (state)
+            {
+                case UpdateState.Available: msg = Text.UpdateAvailable(tag); action = Ui.TextButton(Text.Update, install); break;
+                case UpdateState.Installing: msg = Text.Updating; break;
+                case UpdateState.UpToDate: msg = Text.UpToDate + " (v" + AppInfo.Version + ")"; break;
+                default:
+                    msg = Text.UpdateFailed + (string.IsNullOrEmpty(error) ? "" : ": " + error);
+                    action = Ui.TextButton(Text.Retry, () => { if (tag != null && Updater.ParseVersion(tag) > Updater.Current) updater.Install(); else updater.Check(true); });
+                    break;
+            }
+            var row = new DockPanel { LastChildFill = true };
+            if (action != null)
+            {
+                action.Margin = new Thickness(Tokens.Space2, 0, 0, 0);
+                action.VerticalAlignment = VerticalAlignment.Center;
+                DockPanel.SetDock(action, Dock.Right);
+                row.Children.Add(action);
+            }
+            var t = Ui.Text(msg, TextStyle.Caption, state == UpdateState.Failed ? Theme.Current.TextSecondary : Theme.Current.TextTertiary);
+            t.TextWrapping = TextWrapping.Wrap;
+            t.TextTrimming = TextTrimming.None;
+            t.VerticalAlignment = VerticalAlignment.Center;
+            row.Children.Add(t);
+            return row;
         }
 
         public static MenuItem Item(string header, Action onClick)
@@ -137,6 +230,18 @@ namespace Bwui
                 Theme.Mode = next;
             }));
             m.Items.Add(Check(Text.StartWithWindows, Startup.IsEnabled(AppId), on => Startup.Set(AppId, on)));
+            if (updater != null && updater.IsInstalledCopy)
+            {
+                m.Items.Add(new Separator());
+                if (updater.State == UpdateState.Available) m.Items.Add(Item(Text.InstallUpdate(updater.LatestTag), updater.Install));
+                else
+                {
+                    var c = Item(Text.CheckForUpdates, () => updater.Check(true));
+                    c.IsEnabled = updater.State != UpdateState.Checking && updater.State != UpdateState.Installing;
+                    m.Items.Add(c);
+                }
+                m.Items.Add(Check(Text.AutoUpdate, updater.Auto, on => updater.Auto = on));
+            }
             m.Items.Add(new Separator());
             m.Items.Add(Item(Text.Exit, Close));
             return m;
@@ -163,6 +268,7 @@ namespace Bwui
             }
             placed = true;
             SavePosition();
+            StartUpdater();
             if (App.DebugMenu)
             {
                 // --debug-menu: open the menu, save it as <data dir>\debug-menu.png, then exit (visual checks).

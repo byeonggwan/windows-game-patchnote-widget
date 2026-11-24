@@ -56,7 +56,7 @@ namespace Bwui
     {
         public const string Warning = "", Error = "", Refresh = "", Check = "",
             More = "", Settings = "", HardDrive = "", Info = "", Mail = "",
-            ChevronUp = "", ChevronDown = "", ChevronLeft = "", ChevronRight = "", Close = "";
+            ChevronUp = "", ChevronDown = "", ChevronLeft = "", ChevronRight = "", Close = "", Download = "";
     }
 
     public sealed class Palette

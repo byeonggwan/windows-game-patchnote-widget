@@ -22,7 +22,10 @@ $refs = @(
     "$fw\System.Xml.Linq.dll"
 ) | ForEach-Object { "/r:$_" }
 
-$files = @(Get-ChildItem "$src\BWUI\*.cs") + @(Get-Item "$src\Program.cs") +
+# The app version comes from VERSION; release tags must match it (BWUI DESIGN.md §6.10).
+$version = (Get-Content "$src\VERSION").Trim()
+Set-Content "$out\AppInfo.g.cs" "namespace Bwui { public static class AppInfo { public const string Version = `"$version`"; } }" -Encoding utf8
+$files = @(Get-ChildItem "$src\BWUI\*.cs") + @(Get-Item "$src\Program.cs") + @(Get-Item "$out\AppInfo.g.cs") +
     @(Get-ChildItem "$src\Models\*.cs") + @(Get-ChildItem "$src\Services\*.cs") + @(Get-ChildItem "$src\UI\*.cs") |
     ForEach-Object { $_.FullName }
 

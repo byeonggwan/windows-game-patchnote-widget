@@ -450,6 +450,11 @@ namespace PatchNoteMailbox.UI
             catch { }
         }
 
+        protected override UpdateSource Updates
+        {
+            get { return new UpdateSource("byeonggwan", "windows-game-patchnote-widget", "PatchNoteMailbox.exe"); }
+        }
+
         protected override bool CanRefresh { get { return true; } }
         protected override void RefreshNow() { RefreshAll(); }
 

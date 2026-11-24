@@ -56,6 +56,7 @@ namespace Bwui
             }
 
             DebugMenu = Array.IndexOf(args, "--debug-menu") >= 0;
+            Updater.AfterUpdate(args);
             bool created;
             using (var mx = new Mutex(true, "Local\\" + appId + "_Single", out created))
             {
@@ -189,6 +190,15 @@ namespace Bwui
         public static string Caution { get { return T("주의", "low"); } }
         public static string Critical { get { return T("위험", "very low"); } }
         public static string NothingShown { get { return T("표시할 항목이 없어요. 우클릭해서 켜세요.", "Nothing to show. Right-click to turn a section on."); } }
+
+        public static string CheckForUpdates { get { return T("업데이트 확인", "Check for updates"); } }
+        public static string AutoUpdate { get { return T("자동 업데이트", "Update automatically"); } }
+        public static string Update { get { return T("업데이트", "Update"); } }
+        public static string Updating { get { return T("업데이트 중…", "Updating…"); } }
+        public static string UpToDate { get { return T("최신 버전이에요", "You're up to date"); } }
+        public static string UpdateFailed { get { return T("업데이트하지 못했어요", "Couldn't update"); } }
+        public static string InstallUpdate(string tag) { return T("업데이트 설치 (" + tag + ")", "Install update (" + tag + ")"); }
+        public static string UpdateAvailable(string tag) { return T("새 버전 " + tag, tag + " is available"); }
 
         public static string ThemeItem(ThemeMode m)
         {

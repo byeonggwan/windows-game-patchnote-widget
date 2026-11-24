@@ -126,7 +126,7 @@ namespace PatchNoteMailbox.UI
         {
             // The two cards sit Space3 apart: overlap the transparent shadow margins of both windows.
             double overlap = 2 * Tokens.ShadowRoom - Tokens.Space3;
-            Rect work = SystemParameters.WorkArea;
+            Rect work = GetMonitorWorkArea(dock);
             string dir = (expandDirection ?? "up").ToLowerInvariant();
             double w = ActualWidth, h = ActualHeight;
             double x, y;
@@ -153,6 +153,41 @@ namespace PatchNoteMailbox.UI
 
             Left = x;
             Top = y;
+        }
+
+        private static Rect GetMonitorWorkArea(Window referenceWindow)
+        {
+            try
+            {
+                IntPtr hwnd = new WindowInteropHelper(referenceWindow).Handle;
+                if (hwnd != IntPtr.Zero)
+                {
+                    IntPtr hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                    if (hMon != IntPtr.Zero)
+                    {
+                        var mi = new MONITORINFO();
+                        mi.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
+                        if (GetMonitorInfo(hMon, ref mi))
+                        {
+                            var src = PresentationSource.FromVisual(referenceWindow);
+                            if (src != null && src.CompositionTarget != null)
+                            {
+                                Matrix m = src.CompositionTarget.TransformFromDevice;
+                                Point tl = m.Transform(new Point(mi.rcWork.Left, mi.rcWork.Top));
+                                Point br = m.Transform(new Point(mi.rcWork.Right, mi.rcWork.Bottom));
+                                return new Rect(tl, br);
+                            }
+                            return new Rect(
+                                mi.rcWork.Left,
+                                mi.rcWork.Top,
+                                Math.Max(1, mi.rcWork.Right - mi.rcWork.Left),
+                                Math.Max(1, mi.rcWork.Bottom - mi.rcWork.Top));
+                        }
+                    }
+                }
+            }
+            catch { }
+            return SystemParameters.WorkArea;
         }
 
         private void Render()
@@ -344,7 +379,23 @@ namespace PatchNoteMailbox.UI
 
         private const int GWL_EXSTYLE = -20;
         private const int WS_EX_TOOLWINDOW = 0x80;
+        private const uint MONITOR_DEFAULTTONEAREST = 2;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT { public int Left, Top, Right, Bottom; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MONITORINFO
+        {
+            public int cbSize;
+            public RECT rcMonitor;
+            public RECT rcWork;
+            public uint dwFlags;
+        }
+
         [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr h, int idx);
         [DllImport("user32.dll")] private static extern int SetWindowLong(IntPtr h, int idx, int v);
+        [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
+        [DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
     }
 }

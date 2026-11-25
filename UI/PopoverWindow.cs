@@ -104,6 +104,15 @@ namespace PatchNoteMailbox.UI
             Activate();
         }
 
+        private string ShortTitle(string t)
+        {
+            if (_game == null || string.IsNullOrEmpty(_game.Name) || string.IsNullOrEmpty(t)) return t;
+            int i = t.IndexOf(_game.Name, StringComparison.Ordinal);
+            // Only when the name is inside the title, not the whole of it ("리그 오브 레전드 26.23 패치 노트" stays).
+            if (i <= 0) return t;
+            return (t.Substring(0, i) + t.Substring(i + _game.Name.Length)).Replace("  ", " ").Trim();
+        }
+
         public void RefreshView(GameCacheEntry cache, GameStatus status)
         {
             if (_game == null) return;
@@ -318,7 +327,10 @@ namespace PatchNoteMailbox.UI
 
             AddCell(g, 1, Ui.Text(item.Idx, TextStyle.Caption), HorizontalAlignment.Left);
 
-            var title = Ui.Text(item.Title, TextStyle.Body, isRead ? p.TextSecondary : p.TextPrimary);
+            // The header already names the game, so drop it from the row ("… 로스트아크 정기 점검 완료 안내"
+            // would otherwise be cut before the words that matter). The full title stays in the tooltip.
+            var title = Ui.Text(ShortTitle(item.Title), TextStyle.Body, isRead ? p.TextSecondary : p.TextPrimary);
+            title.ToolTip = item.Title;
             if (!isRead) title.FontWeight = FontWeights.SemiBold;
             title.Margin = new Thickness(0, 0, Tokens.Space2, 0);
             AddCell(g, 2, title, HorizontalAlignment.Left);

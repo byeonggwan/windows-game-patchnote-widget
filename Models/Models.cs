@@ -25,6 +25,8 @@ namespace PatchNoteMailbox.Models
         /// </summary>
         public string Type { get; set; }
         public string Url { get; set; }
+        /// <summary>More pages parsed the same way as Url; their items are merged (for example two title searches).</summary>
+        public List<string> ExtraUrls { get; set; }
         public string BaseUrl { get; set; }
         public Dictionary<string, string> Headers { get; set; }
 

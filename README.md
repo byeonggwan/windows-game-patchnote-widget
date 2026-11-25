@@ -48,7 +48,9 @@ No API keys or headless browsers are required. Every source runs through a singl
 
 ### Lost Ark (`html-regex`)
 
-Fetches the official Korean Lost Ark notice list and filters strictly to posts containing **`업데이트 내역 안내`** in the title, extracting each post's numeric `idx`, title, date, and direct link.
+Fetches the official Korean Lost Ark notice list with two title searches and keeps posts containing **`업데이트 내역 안내`** (update notes) or **`정기 점검 완료`** (weekly maintenance done), extracting each post's numeric `idx`, title, date, and direct link. Every regular maintenance from November 2024 to November 2026 (108 in all) ended with exactly one of these two posts. Emergency maintenance (`임시 점검`) is left out.
+
+The searches are `Url` plus `ExtraUrls` in `games.json`; their results are merged. An existing `games.json` that still has the old Lost Ark default (update notes only) is upgraded on start; an entry you edited is left alone.
 
 ### League of Legends (`next-data`)
 

@@ -67,28 +67,19 @@ namespace PatchNoteMailbox.Services
                 return new List<PatchNoteItem>();
 
             string type = (game.Provider.Type ?? "html-regex").Trim().ToLowerInvariant();
-            string body = await GetStringAsync(game.Provider.Url, game.Provider.Headers);
 
-            List<PatchNoteItem> rawItems;
-            if (type == "html-regex")
+            // Url plus any ExtraUrls, parsed the same way. If one page fails, the whole fetch fails,
+            // so the widget keeps its last good list instead of showing a partial one.
+            var urls = new List<string> { game.Provider.Url };
+            if (game.Provider.ExtraUrls != null)
+                foreach (var u in game.Provider.ExtraUrls)
+                    if (!string.IsNullOrWhiteSpace(u)) urls.Add(u);
+
+            var rawItems = new List<PatchNoteItem>();
+            foreach (var url in urls)
             {
-                rawItems = ParseHtmlRegex(body, game.Provider);
-            }
-            else if (type == "next-data")
-            {
-                rawItems = ParseNextData(body, game.Provider);
-            }
-            else if (type == "json-api")
-            {
-                rawItems = ParseJsonApi(body, game.Provider);
-            }
-            else if (type == "rss")
-            {
-                rawItems = ParseRss(body, game.Provider);
-            }
-            else
-            {
-                throw new NotSupportedException("지원하지 않는 수집 어댑터 타입: " + type);
+                string body = await GetStringAsync(url, game.Provider.Headers);
+                rawItems.AddRange(Parse(type, body, game.Provider));
             }
 
             // Apply common filter + deduplicate + sort latest-first
@@ -116,6 +107,15 @@ namespace PatchNoteMailbox.Services
             });
 
             return filtered;
+        }
+
+        private List<PatchNoteItem> Parse(string type, string body, ProviderConfig p)
+        {
+            if (type == "html-regex") return ParseHtmlRegex(body, p);
+            if (type == "next-data") return ParseNextData(body, p);
+            if (type == "json-api") return ParseJsonApi(body, p);
+            if (type == "rss") return ParseRss(body, p);
+            throw new NotSupportedException("지원하지 않는 수집 어댑터 타입: " + type);
         }
 
         private async Task<string> GetStringAsync(string url, Dictionary<string, string> headers)
@@ -158,7 +158,7 @@ namespace PatchNoteMailbox.Services
             {
                 string idx = m.Groups[idGrp].Success ? CleanText(m.Groups[idGrp].Value) : "";
                 string title = m.Groups[titleGrp].Success ? CleanText(m.Groups[titleGrp].Value) : "";
-                string rawDate = m.Groups[dateGrp].Success ? CleanText(m.Groups[dateGrp].Value) : "";
+                string rawDate = m.Groups[dateGrp].Success ? DateText(m.Groups[dateGrp].Value) : "";
                 string url = m.Groups[urlGrp].Success ? WebUtility.HtmlDecode(m.Groups[urlGrp].Value.Trim()) : "";
 
                 if (string.IsNullOrWhiteSpace(idx) && !string.IsNullOrWhiteSpace(url))
@@ -421,6 +421,16 @@ namespace PatchNoteMailbox.Services
                 return baseUrl.TrimEnd('/') + "/" + url.TrimStart('/');
             }
             return url;
+        }
+
+        /// <summary>
+        /// Lost Ark shows today's posts as relative text ("1시간 전") but always carries the exact time in
+        /// data-utc. Prefer a machine-readable time in the captured markup over its visible text.
+        /// </summary>
+        private static string DateText(string rawHtml)
+        {
+            var m = Regex.Match(rawHtml ?? "", "(?:data-utc|datetime)=\"([^\"]+)\"", RegexOptions.IgnoreCase);
+            return m.Success ? m.Groups[1].Value.Trim() : CleanText(rawHtml);
         }
 
         private static string NormalizeDate(string rawDate, out long sortKey)

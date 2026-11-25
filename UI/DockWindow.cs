@@ -682,7 +682,9 @@ namespace PatchNoteMailbox.UI
             {
                 Notes = new List<PatchNoteItem>
                 {
+                    new PatchNoteItem { Idx = "13608", Title = "11월 25일(수) 로스트아크 정기 점검 완료 안내", Date = "2026.11.25" },
                     new PatchNoteItem { Idx = "13598", Title = "11월 18일(수) 업데이트 내역 안내", Date = "2026.11.18" },
+                    new PatchNoteItem { Idx = "13590", Title = "11월 11일(수) 로스트아크 정기 점검 완료 안내", Date = "2026.11.11" },
                     new PatchNoteItem { Idx = "13585", Title = "11월 4일(수) 업데이트 내역 안내", Date = "2026.11.04" },
                     new PatchNoteItem { Idx = "13578", Title = "10월 21일(수) 업데이트 내역 안내", Date = "2026.10.21" },
                     new PatchNoteItem { Idx = "13565", Title = "10월 7일(수) 업데이트 내역 안내", Date = "2026.10.07" },
